@@ -4,3 +4,4 @@ assets/*.jpg
 models
 
 __pycache__
+.gradio

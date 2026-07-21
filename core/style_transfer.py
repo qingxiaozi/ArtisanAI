@@ -1,88 +1,93 @@
 import os
 import torch
 from PIL import Image
-from diffusers import AutoPipelineForImage2Image
+from diffusers import StableDiffusionXLControlNetImg2ImgPipeline, ControlNetModel, AutoencoderKL
+from diffusers.schedulers import EulerDiscreteScheduler
+from controlnet_aux import CannyDetector
 from utils.gpu_utils import clear_gpu_cache
 
-# 直接指定 Hugging Face 镜像站点（国内加速）
+# 国内镜像加速
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-# 禁用 Xet 存储以避免 401 认证错误
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 
-
 class StyleTransferProcessor:
-    """
-    图像风格转换处理器
-    基于 Stable Diffusion XL Turbo (diffusers/PyTorch) 的 Img2Img 管线实现
-    AMD GPU 通过 ROCm 加速
-    """
-
-    def __init__(self, model_id: str = "stabilityai/sdxl-turbo", device: str = "cuda"):
-        """
-        初始化风格转换处理器
-
-        :param model_id: Hugging Face 模型ID 或本地模型路径
-        :param device: 运行设备 (ROCm 环境下使用 'cuda')
-        """
-        self.model_id = model_id
+    def __init__(self, device: str = "cuda"):
         self.device = device
         self.pipe = None
+        self.canny_detector = CannyDetector()
 
-    def load_model(self):
-        """加载模型到显存，并应用 ROCm 优化"""
-        if self.pipe is not None:
+    def load_model(self, model_dir: str = None):
+        """
+        model_dir: 本地模型目录,包含以下子目录:
+            sdxl-base-1.0/        → SDXL Base 单文件权重 (sd_xl_base_1.0.safetensors)
+            controlnet-canny-sdxl-1.0/ → ControlNet Canny 权重 + config.json
+            sdxl-vae-fp16-fix/    → VAE fp16 fix 权重 + config.json
+            sdxl-lightning/       → SDXL Lightning LoRA
+        如果为 None,则从 HuggingFace 在线下载。
+        """
+        if self.pipe is not None: return
+
+        if model_dir is None:
+            print("请从 HuggingFace 镜像下载 SDXL + Lightning + ControlNet 模型...")
             return
+        else:
+            controlnet_dir = os.path.join(model_dir, "controlnet-canny-sdxl-1.0")
+            vae_dir = os.path.join(model_dir, "sdxl-vae-fp16-fix")
+            base_dir = os.path.join(model_dir, "sdxl-base-1.0")
+            lightning_dir = os.path.join(model_dir, "sdxl-lightning")
 
-        print(f"正在加载模型: {self.model_id} ...")
+            # 1. 从本地加载 ControlNet(diffusers 分割格式目录)
+            controlnet = ControlNetModel.from_pretrained(
+                controlnet_dir, torch_dtype=torch.float16
+            )
 
-        self.pipe = AutoPipelineForImage2Image.from_pretrained(
-            self.model_id,
-            torch_dtype=torch.float16,
-            variant="fp16",
-            local_files_only=os.path.isdir(self.model_id),
-        )
+            # 2. 从本地加载 VAE
+            vae = AutoencoderKL.from_pretrained(
+                vae_dir, torch_dtype=torch.float16
+            )
+
+            # 3. 从本地加载 SDXL Base 完整 pipeline(diffusers 分割格式目录)
+            self.pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
+                base_dir, controlnet=controlnet, vae=vae, torch_dtype=torch.float16
+            )
+
+            # 4. 从本地加载 Lightning LoRA
+            lightning_path = os.path.join(lightning_dir, "sdxl_lightning_8step_lora.safetensors")
+            self.pipe.load_lora_weights(lightning_path)
+
+        # 5. 配置 Lightning 专用调度器
+        self.pipe.scheduler = EulerDiscreteScheduler.from_config(self.pipe.scheduler.config, timestep_spacing="trailing")
 
         self.pipe.to(self.device)
-        self.pipe.enable_model_cpu_offload()
+        self.pipe.enable_model_cpu_offload() # AMD 显卡防 OOM 必备
+        print("SDXL + Lightning + ControlNet 引擎加载完成。")
 
-        print("SDXL Turbo 模型加载完成 (PyTorch + ROCm)。")
+    def process(self, image: Image.Image, prompt: str, style_lora_path: str = None,
+                strength: float = 0.65, lora_scale: float = 0.8) -> Image.Image:
+        if self.pipe is None: raise RuntimeError("请先调用 load_model()")
 
-    def process(self, image: Image.Image, prompt: str, strength: float = 0.5,
-                num_inference_steps: int = 2, guidance_scale: float = 0.0) -> Image.Image:
-        """
-        执行风格转换
+        # SDXL 原生分辨率 512x512，强制统一到此尺寸
+        image = image.resize((512, 512), Image.LANCZOS)
 
-        :param image: 输入的 PIL 图像
-        :param prompt: 风格转换提示词
-        :param strength: 重绘幅度 (0.0 - 1.0)，Turbo 推荐 0.5 左右
-        :param num_inference_steps: 推理步数，Turbo 仅需 1-4 步即可
-        :param guidance_scale: 提示词引导系数，Turbo 训练时未使用，必须设为 0.0
-        :return: 转换后的 PIL 图像
-        """
-        if self.pipe is None:
-            raise RuntimeError("模型尚未加载，请先调用 load_model() 方法。")
+        # 提取 Canny 骨架图
+        canny_image = self.canny_detector(image)
 
-        if image.mode != "RGB":
-            image = image.convert("RGB")
+        # 动态挂载/卸载 风格 LoRA
+        if style_lora_path and os.path.exists(style_lora_path):
+            self.pipe.load_lora_weights(style_lora_path, adapter_name="style")
+            self.pipe.set_adapters(["style"], adapter_weights=[lora_scale])
+        else:
+            self.pipe.disable_lora() # 无风格 LoRA 时禁用
 
-        print(f"开始风格转换... 提示词: '{prompt}', 强度: {strength}, 步数: {num_inference_steps}")
-
+        # 执行推理 (Lightning 推荐 8步, CFG=1.5)
         result = self.pipe(
-            prompt=prompt,
-            image=image,
-            strength=strength,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
+            prompt=prompt, image=image, control_image=canny_image,
+            strength=strength, num_inference_steps=8, guidance_scale=1.5
         )
 
-        output_image = result.images[0]
-        print("风格转换完成。")
-        return output_image
+        return result.images[0]
 
     def unload_model(self):
-        """卸载模型，释放 GPU 显存"""
-        if self.pipe is not None:
-            del self.pipe
-            self.pipe = None
+        if self.pipe:
+            del self.pipe; self.pipe = None
             clear_gpu_cache()
-            print("模型已卸载，显存已释放。")

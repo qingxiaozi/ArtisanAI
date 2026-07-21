@@ -66,8 +66,8 @@ class StyleTransferProcessor:
                 strength: float = 0.65, lora_scale: float = 0.8) -> Image.Image:
         if self.pipe is None: raise RuntimeError("请先调用 load_model()")
 
-        # SDXL 原生分辨率 512x512，强制统一到此尺寸
-        image = image.resize((512, 512), Image.LANCZOS)
+        # SDXL 原生分辨率 1024x1024，统一到此尺寸
+        image = image.resize((1024, 1024), Image.LANCZOS)
 
         # 提取 Canny 骨架图
         canny_image = self.canny_detector(image)
@@ -82,7 +82,8 @@ class StyleTransferProcessor:
         # 执行推理 (Lightning 推荐 8步, CFG=1.5)
         result = self.pipe(
             prompt=prompt, image=image, control_image=canny_image,
-            strength=strength, num_inference_steps=8, guidance_scale=1.5
+            strength=strength, num_inference_steps=8, guidance_scale=1.5,
+            height=1024, width=1024
         )
 
         return result.images[0]

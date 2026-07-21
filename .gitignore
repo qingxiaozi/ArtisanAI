@@ -1,7 +1,5 @@
 download_model.py
-test_style_transfer.py
-assets/*.jpg
+assets
 models
-
 __pycache__
 .gradio

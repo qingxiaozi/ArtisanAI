@@ -58,41 +58,83 @@ generator = torch.Generator(device="cuda").manual_seed(seed)
 prompt = "A robot, 4k photo"
 controlnet_conditioning_scale = 0.5
 
+def extract_keyframes(frames, threshold=0.3):
+    """Extract keyframes using HSV histogram difference.
+    Uses Bhattacharyya distance (0 = identical, 1 = complete mismatch).
+    Returns list of segments [{start: int, end: int}, ...] where each start is a keyframe.
+    """
+    segments = []
+    seg_start = 0
+    prev_hist = None
+    for i, frame in enumerate(frames):
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
+        hist = cv2.normalize(hist, hist).flatten()
+        if prev_hist is not None:
+            dist = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_BHATTACHARYYA)
+            if dist > threshold:
+                segments.append({"start": seg_start, "end": i - 1})
+                seg_start = i
+        prev_hist = hist
+    segments.append({"start": seg_start, "end": len(frames) - 1})
+    return segments
+
+
 video_path = os.path.join(os.path.dirname(__file__), "videos", "1080-25-低.mp4")
 cap = cv2.VideoCapture(video_path)
 fps = cap.get(cv2.CAP_PROP_FPS)
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+# Step 1: read all frames
+print("Reading all frames...")
+raw_frames = []
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    raw_frames.append(frame)
+cap.release()
+
+# Step 2: extract keyframes → segments
+segments = extract_keyframes(raw_frames)
+print(f"Found {len(segments)} segments: {segments}")
+
+# Step 3: process each segment, using keyframe as reference
 output_dir = os.path.join(os.path.dirname(__file__), "output_videos")
 os.makedirs(output_dir, exist_ok=True)
 output_path = os.path.join(output_dir, "output.mp4")
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 out = cv2.VideoWriter(output_path, fourcc, fps, (1024, 1024))
 
-frame_idx = 0
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    image = Image.fromarray(frame_rgb).resize((1024, 1024))
-    depth_image = get_depth_map(image)
-    result = pipe(
-        prompt,
-        image=image,
-        control_image=depth_image,
-        strength=0.99,
-        num_inference_steps=50,
-        controlnet_conditioning_scale=controlnet_conditioning_scale,
-        generator=generator,
-    ).images[0]
-    out_frame = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
-    out.write(out_frame)
-    frame_idx += 1
-    print(f"Processed frame {frame_idx}/{total_frames}")
+keyframes = []
+for seg_idx, seg in enumerate(segments):
+    keyframe_bgr = raw_frames[seg["start"]]
+    keyframe_rgb = cv2.cvtColor(keyframe_bgr, cv2.COLOR_BGR2RGB)
+    keyframe_pil = Image.fromarray(keyframe_rgb).resize((1024, 1024))
+    keyframes.append(keyframe_pil)
+    keyframe_depth = get_depth_map(keyframe_pil)
+    print(f"Segment {seg_idx + 1}/{len(segments)}: frames {seg['start']}-{seg['end']}")
+    # for i in range(seg["start"], seg["end"] + 1):
+    #     frame_rgb = cv2.cvtColor(raw_frames[i], cv2.COLOR_BGR2RGB)
+    #     frame_pil = Image.fromarray(frame_rgb).resize((1024, 1024))
+    #     result = pipe(
+    #         prompt,
+    #         image=frame_pil,
+    #         control_image=keyframe_depth,
+    #         strength=0.99,
+    #         num_inference_steps=50,
+    #         controlnet_conditioning_scale=controlnet_conditioning_scale,
+    #         generator=generator,
+    #     ).images[0]
+    #     out_frame = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
+    #     out.write(out_frame)
 
-cap.release()
 out.release()
-print(f"Saved to {output_path}")
+
+# Save keyframes
+keyframes_dir = os.path.join(output_dir, "keyframes")
+os.makedirs(keyframes_dir, exist_ok=True)
+for i, kf in enumerate(keyframes):
+    kf.save(os.path.join(keyframes_dir, f"keyframe_{i:04d}.png"))
+print(f"Saved {len(keyframes)} keyframes to {keyframes_dir}")
+print(f"Saved video to {output_path}")

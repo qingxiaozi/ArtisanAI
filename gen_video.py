@@ -11,6 +11,8 @@ from PIL import Image
 from transformers import DPTImageProcessor, DPTForDepthEstimation
 from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline, AutoencoderKL
 import cv2
+import torch.nn.functional as F
+from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 
 depth_estimator = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to("cuda")
 feature_extractor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
@@ -30,6 +32,9 @@ pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
     torch_dtype=torch.float16,
 )
 pipe.enable_model_cpu_offload()
+
+# Load RAFT for optical flow
+raft = raft_large(weights=Raft_Large_Weights.DEFAULT).to("cuda").eval()
 
 
 def get_depth_map(image):
@@ -57,6 +62,40 @@ generator = torch.Generator(device="cuda").manual_seed(seed)
 
 prompt = "A robot, 4k photo"
 controlnet_conditioning_scale = 0.5
+
+
+def warp_image(image_tensor, flow):
+    """Warp image_tensor (C, H, W) using backward optical flow (H, W, 2).
+    Backward flow: for pixel (x,y) in target, sample source at (x+flow_x, y+flow_y).
+    """
+    _, h, w = image_tensor.shape
+    grid_y, grid_x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
+    grid = torch.stack([grid_x, grid_y], dim=-1).float().to(flow.device)
+    sample_grid = grid + flow
+    sample_grid[..., 0] = 2.0 * sample_grid[..., 0] / max(w - 1, 1) - 1.0
+    sample_grid[..., 1] = 2.0 * sample_grid[..., 1] / max(h - 1, 1) - 1.0
+    warped = F.grid_sample(
+        image_tensor.unsqueeze(0), sample_grid.unsqueeze(0),
+        mode="bilinear", padding_mode="border", align_corners=True,
+    )
+    return warped.squeeze(0)
+
+
+def compute_backward_flow(raft_model, frame_a_bgr, frame_b_bgr):
+    """Compute backward optical flow from frame_b to frame_a.
+    Returns flow (H, W, 2) float32.
+    """
+    def to_raft_input(bgr):
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        t = torch.from_numpy(rgb).permute(2, 0, 1).float().to("cuda")
+        return t.unsqueeze(0)
+    img_a = to_raft_input(frame_a_bgr)
+    img_b = to_raft_input(frame_b_bgr)
+    with torch.no_grad():
+        flows = raft_model(img_b, img_a)
+    flow = flows[-1].squeeze(0).permute(1, 2, 0)
+    return flow
+
 
 def extract_keyframes(frames, threshold=0.3):
     """Extract keyframes using HSV histogram difference.
@@ -108,26 +147,41 @@ out = cv2.VideoWriter(output_path, fourcc, fps, (1024, 1024))
 
 keyframes = []
 for seg_idx, seg in enumerate(segments):
-    keyframe_bgr = raw_frames[seg["start"]]
+    start, end = seg["start"], seg["end"]
+    # Save original keyframe
+    keyframe_bgr = raw_frames[start]
     keyframe_rgb = cv2.cvtColor(keyframe_bgr, cv2.COLOR_BGR2RGB)
     keyframe_pil = Image.fromarray(keyframe_rgb).resize((1024, 1024))
     keyframes.append(keyframe_pil)
+
+    # Pipe only on keyframe
     keyframe_depth = get_depth_map(keyframe_pil)
-    print(f"Segment {seg_idx + 1}/{len(segments)}: frames {seg['start']}-{seg['end']}")
-    # for i in range(seg["start"], seg["end"] + 1):
-    #     frame_rgb = cv2.cvtColor(raw_frames[i], cv2.COLOR_BGR2RGB)
-    #     frame_pil = Image.fromarray(frame_rgb).resize((1024, 1024))
-    #     result = pipe(
-    #         prompt,
-    #         image=frame_pil,
-    #         control_image=keyframe_depth,
-    #         strength=0.99,
-    #         num_inference_steps=50,
-    #         controlnet_conditioning_scale=controlnet_conditioning_scale,
-    #         generator=generator,
-    #     ).images[0]
-    #     out_frame = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
-    #     out.write(out_frame)
+    print(f"Segment {seg_idx + 1}/{len(segments)}: frames {start}-{end}")
+    result = pipe(
+        prompt,
+        image=keyframe_pil,
+        control_image=keyframe_depth,
+        strength=0.99,
+        num_inference_steps=50,
+        controlnet_conditioning_scale=controlnet_conditioning_scale,
+        generator=generator,
+    ).images[0]
+    prev_stylized = torch.from_numpy(np.array(result)).permute(2, 0, 1).float().to("cuda") / 255.0
+    out_frame = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
+    out.write(out_frame)
+
+    # Propagate style to remaining frames via optical flow
+    for i in range(start + 1, end + 1):
+        curr_bgr = raw_frames[i - 1]
+        next_bgr = raw_frames[i]
+        curr_resized = cv2.resize(curr_bgr, (1024, 1024))
+        next_resized = cv2.resize(next_bgr, (1024, 1024))
+        flow = compute_backward_flow(raft, curr_resized, next_resized)
+        warped = warp_image(prev_stylized, flow)
+        prev_stylized = warped
+        warped_np = (warped.permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+        out_frame = cv2.cvtColor(warped_np, cv2.COLOR_RGB2BGR)
+        out.write(out_frame)
 
 out.release()
 

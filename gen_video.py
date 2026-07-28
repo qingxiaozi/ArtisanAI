@@ -60,7 +60,7 @@ def get_depth_map(image):
 seed = 42
 generator = torch.Generator(device="cuda").manual_seed(seed)
 
-prompt = "A robot, 4k photo"
+prompt = "anime style, Japanese animation, cel shading, clean lines, vibrant colors, detailed character design"
 controlnet_conditioning_scale = 0.5
 
 
@@ -97,9 +97,10 @@ def compute_backward_flow(raft_model, frame_a_bgr, frame_b_bgr):
     return flow
 
 
-def extract_keyframes(frames, threshold=0.3):
+def extract_keyframes(frames, threshold=0.04):
     """Extract keyframes using HSV histogram difference.
     Uses Bhattacharyya distance (0 = identical, 1 = complete mismatch).
+    Higher threshold → fewer keyframes, lower threshold → more keyframes.
     Returns list of segments [{start: int, end: int}, ...] where each start is a keyframe.
     """
     segments = []
@@ -126,8 +127,9 @@ total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
 # Step 1: read all frames
 print("Reading all frames...")
+max_frames = int(fps * 10)
 raw_frames = []
-while True:
+while len(raw_frames) < max_frames:
     ret, frame = cap.read()
     if not ret:
         break
@@ -149,36 +151,35 @@ keyframes = []
 for seg_idx, seg in enumerate(segments):
     start, end = seg["start"], seg["end"]
     # Save original keyframe
-    keyframe_bgr = raw_frames[start]
+    keyframe_bgr = cv2.resize(raw_frames[start], (1024, 1024))
     keyframe_rgb = cv2.cvtColor(keyframe_bgr, cv2.COLOR_BGR2RGB)
-    keyframe_pil = Image.fromarray(keyframe_rgb).resize((1024, 1024))
+    keyframe_pil = Image.fromarray(keyframe_rgb)
     keyframes.append(keyframe_pil)
 
-    # Pipe only on keyframe
+    # Use original keyframe directly (no pipe)
     keyframe_depth = get_depth_map(keyframe_pil)
     print(f"Segment {seg_idx + 1}/{len(segments)}: frames {start}-{end}")
-    result = pipe(
-        prompt,
-        image=keyframe_pil,
-        control_image=keyframe_depth,
-        strength=0.99,
-        num_inference_steps=50,
-        controlnet_conditioning_scale=controlnet_conditioning_scale,
-        generator=generator,
-    ).images[0]
-    prev_stylized = torch.from_numpy(np.array(result)).permute(2, 0, 1).float().to("cuda") / 255.0
-    out_frame = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
-    out.write(out_frame)
+    # result = pipe(
+    #     prompt,
+    #     image=keyframe_pil,
+    #     control_image=keyframe_depth,
+    #     strength=0.5,
+    #     num_inference_steps=50,
+    #     controlnet_conditioning_scale=controlnet_conditioning_scale,
+    #     generator=generator,
+    # ).images[0]
+    prev_frame = torch.from_numpy(keyframe_rgb).permute(2, 0, 1).float().to("cuda") / 255.0
+    out.write(keyframe_bgr)
 
-    # Propagate style to remaining frames via optical flow
+    # Propagate frames via optical flow
     for i in range(start + 1, end + 1):
         curr_bgr = raw_frames[i - 1]
         next_bgr = raw_frames[i]
         curr_resized = cv2.resize(curr_bgr, (1024, 1024))
         next_resized = cv2.resize(next_bgr, (1024, 1024))
         flow = compute_backward_flow(raft, curr_resized, next_resized)
-        warped = warp_image(prev_stylized, flow)
-        prev_stylized = warped
+        warped = warp_image(prev_frame, flow)
+        prev_frame = warped
         warped_np = (warped.permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
         out_frame = cv2.cvtColor(warped_np, cv2.COLOR_RGB2BGR)
         out.write(out_frame)

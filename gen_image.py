@@ -52,6 +52,9 @@ def get_depth_map(image):
     return image
 
 
+seed = 42
+generator = torch.Generator(device="cuda").manual_seed(seed)
+
 prompt = "A robot, 4k photo"
 images_dir = os.path.join(os.path.dirname(__file__), "images")
 os.makedirs(images_dir, exist_ok=True)
@@ -70,5 +73,8 @@ images = pipe(
     strength=0.99,
     num_inference_steps=50,
     controlnet_conditioning_scale=controlnet_conditioning_scale,
+    generator=generator,
 ).images
-images[0].save(f"robot_cat.png")
+output_dir = os.path.join(os.path.dirname(__file__), "output_images")
+os.makedirs(output_dir, exist_ok=True)
+images[0].save(os.path.join(output_dir, "robot_cat.png"))

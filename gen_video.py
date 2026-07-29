@@ -34,7 +34,9 @@ pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
 pipe.enable_model_cpu_offload()
 
 # Load RAFT for optical flow
-raft = raft_large(weights=Raft_Large_Weights.DEFAULT).to("cuda").eval()
+raft_weights = Raft_Large_Weights.DEFAULT
+raft_transforms = raft_weights.transforms()
+raft = raft_large(weights=raft_weights).to("cuda").eval()
 
 
 def get_depth_map(image):
@@ -87,17 +89,18 @@ def compute_backward_flow(raft_model, frame_a_bgr, frame_b_bgr):
     """
     def to_raft_input(bgr):
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        t = torch.from_numpy(rgb).permute(2, 0, 1).float().to("cuda")
+        t = torch.from_numpy(rgb).permute(2, 0, 1).to("cuda")
         return t.unsqueeze(0)
     img_a = to_raft_input(frame_a_bgr)
     img_b = to_raft_input(frame_b_bgr)
+    img_a, img_b = raft_transforms(img_a, img_b)
     with torch.no_grad():
         flows = raft_model(img_b, img_a)
     flow = flows[-1].squeeze(0).permute(1, 2, 0)
     return flow
 
 
-def extract_keyframes(frames, threshold=0.04):
+def extract_keyframes(frames, threshold=0.045):
     """Extract keyframes using HSV histogram difference.
     Uses Bhattacharyya distance (0 = identical, 1 = complete mismatch).
     Higher threshold → fewer keyframes, lower threshold → more keyframes.
@@ -168,18 +171,15 @@ for seg_idx, seg in enumerate(segments):
     #     controlnet_conditioning_scale=controlnet_conditioning_scale,
     #     generator=generator,
     # ).images[0]
-    prev_frame = torch.from_numpy(keyframe_rgb).permute(2, 0, 1).float().to("cuda") / 255.0
+    keyframe_tensor = torch.from_numpy(keyframe_rgb).permute(2, 0, 1).float().to("cuda") / 255.0
     out.write(keyframe_bgr)
 
-    # Propagate frames via optical flow
+    # Warp each frame directly from keyframe via optical flow
     for i in range(start + 1, end + 1):
-        curr_bgr = raw_frames[i - 1]
-        next_bgr = raw_frames[i]
+        curr_bgr = raw_frames[i]
         curr_resized = cv2.resize(curr_bgr, (1024, 1024))
-        next_resized = cv2.resize(next_bgr, (1024, 1024))
-        flow = compute_backward_flow(raft, curr_resized, next_resized)
-        warped = warp_image(prev_frame, flow)
-        prev_frame = warped
+        flow = compute_backward_flow(raft, keyframe_bgr, curr_resized)
+        warped = warp_image(keyframe_tensor, flow)
         warped_np = (warped.permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
         out_frame = cv2.cvtColor(warped_np, cv2.COLOR_RGB2BGR)
         out.write(out_frame)

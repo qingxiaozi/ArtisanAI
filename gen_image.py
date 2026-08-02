@@ -63,7 +63,28 @@ else:
     pipe = pipe.to("cuda")
 pipe.load_lora_weights("ByteDance/SDXL-Lightning", weight_name="sdxl_lightning_8step_lora.safetensors")
 pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
-pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead")
+
+# Pre-download all style LoRAs (load then unload, files cached in models/)
+_STYLE_LORA_REPOS = [
+    "ming-yang/sdxl_chinese_ink_lora",
+    "ntc-ai/SDXL-LoRA-slider.Studio-Ghibli-style",
+    "ntc-ai/SDXL-LoRA-slider.anime",
+    "ntc-ai/SDXL-LoRA-slider.oil-painting",
+    "ntc-ai/SDXL-LoRA-slider.pixar-style",
+    "ostris/watercolor_style_lora_sdxl",
+    "issaccyj/lora-sdxl-cyberpunk",
+]
+print("Pre-downloading style LoRAs...")
+for _repo in _STYLE_LORA_REPOS:
+    try:
+        pipe.load_lora_weights(_repo, adapter_name="_tmp")
+        pipe.delete_adapters(["_tmp"])
+        print(f"  Cached: {_repo}")
+    except Exception as e:
+        print(f"  Failed: {_repo} — {e}")
+print("LoRA pre-download done.")
+# Lightning adapter name (may be renamed to 'default_0' after pre-download dance)
+LIGHTNING_ADAPTER = pipe.get_active_adapters()[0]
 
 
 def get_depth_map(image):

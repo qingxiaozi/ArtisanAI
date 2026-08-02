@@ -8,7 +8,48 @@ import gradio as gr
 import torch
 from PIL import Image
 from diffusers.utils import load_image
-from gen_image import pipe, get_depth_map
+from gen_image import pipe, get_depth_map, LIGHTNING_ADAPTER
+
+# LoRA manifest: display_name → {repo_id, prompt, scale}
+# 首次使用时会自动从 HuggingFace 下载并缓存到 models/
+LORA_MANIFEST = {
+    "无": {"repo_id": None, "prompt": "A robot, 4k photo", "scale": 0.8},
+    "中国水墨画": {
+        "repo_id": "ming-yang/sdxl_chinese_ink_lora",
+        "prompt": "traditional Chinese ink wash painting style, elegant brush strokes, misty mountains, black and white ink, poetic atmosphere",
+        "scale": 1.0,
+    },
+    "吉卜力工作室": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.Studio-Ghibli-style",
+        "prompt": "A beautiful Ghibli style portrait, hand-drawn animation, soft lighting, Miyazaki aesthetic, vibrant colors",
+        "scale": 1.0,
+    },
+    "日式动漫": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.anime",
+        "prompt": "anime style, Japanese animation, cel shading, clean lines, vibrant colors, detailed character design",
+        "scale": 1.0,
+    },
+    "油画": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.oil-painting",
+        "prompt": "oil painting style, thick brushstrokes, rich textures, classical composition, impasto technique",
+        "scale": 1.0,
+    },
+    "皮克斯动画": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.pixar-style",
+        "prompt": "Pixar style, 3D animation render, cartoon aesthetic, soft lighting, expressive character, Disney CGI look",
+        "scale": 1.0,
+    },
+    "水彩画": {
+        "repo_id": "ostris/watercolor_style_lora_sdxl",
+        "prompt": "watercolor painting style, soft color washes, gentle gradients, translucent tones, artistic flowing colors",
+        "scale": 1.0,
+    },
+    "赛博朋克": {
+        "repo_id": "issaccyj/lora-sdxl-cyberpunk",
+        "prompt": "cyberpunk style, neon lights, futuristic city, high tech low life, rain-slicked streets, blade runner aesthetic",
+        "scale": 1.0,
+    },
+}
 
 # Ensure default input image exists
 _default_image_path = os.path.join(os.path.dirname(__file__), "images", "cat.png")
@@ -38,9 +79,25 @@ def _patched_json_schema_to_python_type(schema, defs):
 gradio_client_utils.get_type = _patched_get_type
 gradio_client_utils._json_schema_to_python_type = _patched_json_schema_to_python_type
 
-def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale, guidance_scale, seed):
+def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale, guidance_scale, seed, lora_name):
     if image is None:
         return None, ""
+
+    # Apply style LoRA
+    if lora_name and lora_name in LORA_MANIFEST and LORA_MANIFEST[lora_name]["repo_id"]:
+        lora_info = LORA_MANIFEST[lora_name]
+        try:
+            # Remove previous style adapter if exists
+            if "style" in pipe.get_active_adapters():
+                pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
+                pipe.delete_adapters(["style"])
+            pipe.load_lora_weights(lora_info["repo_id"], adapter_name="style")
+            pipe.set_adapters([LIGHTNING_ADAPTER, "style"], adapter_weights=[1.0, lora_info.get("scale", 0.8)])
+        except Exception as e:
+            print(f"Failed to load LoRA '{lora_name}': {e}")
+            pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
+    else:
+        pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
 
     t_total = time.time()
 
@@ -121,8 +178,14 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
     with gr.Row():
         with gr.Column(scale=1):
             input_image = gr.Image(type="pil", label="Input Image", value=_default_image_path)
+            lora_selector = gr.Dropdown(
+                choices=list(LORA_MANIFEST.keys()),
+                value="无",
+                label="Style LoRA",
+                interactive=True,
+            )
             prompt = gr.Textbox(
-                value="A robot, 4k photo",
+                value=LORA_MANIFEST["无"]["prompt"],
                 label="Prompt",
                 lines=3,
             )
@@ -144,9 +207,19 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
             output_image = gr.Image(type="pil", label="Generated Image")
             timing_output = gr.Textbox(label="Timing", interactive=False, lines=6)
 
+    def on_lora_change(lora_name):
+        info = LORA_MANIFEST.get(lora_name, LORA_MANIFEST["无"])
+        return info["prompt"]
+
+    lora_selector.change(
+        fn=on_lora_change,
+        inputs=[lora_selector],
+        outputs=[prompt],
+    )
+
     generate_btn.click(
         fn=generate,
-        inputs=[input_image, prompt, negative_prompt, strength, steps, conditioning_scale, guidance_scale, seed],
+        inputs=[input_image, prompt, negative_prompt, strength, steps, conditioning_scale, guidance_scale, seed, lora_selector],
         outputs=[output_image, timing_output],
     )
 
@@ -154,7 +227,7 @@ if __name__ == "__main__":
     # Warm up pipeline (first inference compiles CUDA kernels)
     print("Warming up pipeline...")
     warmup_img = Image.open(_default_image_path)
-    generate(warmup_img, "A robot, 4k photo", "", 0.99, 8, 0.5, 1.5, 42)
+    generate(warmup_img, "A robot, 4k photo", "", 0.99, 8, 0.5, 1.5, 42, "无")
     print("Warmup done.")
 
     demo.launch(server_name="0.0.0.0")

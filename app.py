@@ -135,7 +135,7 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
                 strength = gr.Slider(0.0, 1.0, value=0.99, step=0.01, label="Strength")
                 conditioning_scale = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="ControlNet Scale")
             with gr.Row():
-                steps = gr.Slider(1, 100, value=4, step=1, label="Steps")
+                steps = gr.Slider(1, 100, value=8, step=1, label="Steps")
                 guidance_scale = gr.Slider(0.5, 3.0, value=1.5, step=0.1, label="Guidance Scale")
             seed = gr.Number(value=42, label="Seed (-1 = random)", precision=0)
             generate_btn = gr.Button("Generate", variant="primary")
@@ -154,7 +154,7 @@ if __name__ == "__main__":
     # Warm up pipeline (first inference compiles CUDA kernels)
     print("Warming up pipeline...")
     warmup_img = Image.open(_default_image_path)
-    generate(warmup_img, "A robot, 4k photo", "", 0.99, 4, 0.5, 1.5, 42)
+    generate(warmup_img, "A robot, 4k photo", "", 0.99, 8, 0.5, 1.5, 42)
     print("Warmup done.")
 
     demo.launch(server_name="0.0.0.0")

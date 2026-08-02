@@ -4,12 +4,15 @@ import os
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HOME"] = os.path.join(os.path.dirname(__file__), "models")
 
+# ---- Quantization toggle (set to False for fp16) ----
+USE_NF4 = False
+
 import torch
 import numpy as np
 from PIL import Image
 
-from transformers import DPTImageProcessor, DPTForDepthEstimation
-from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline, AutoencoderKL, LCMScheduler
+from transformers import DPTImageProcessor, DPTForDepthEstimation, BitsAndBytesConfig
+from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline, AutoencoderKL, LCMScheduler, UNet2DConditionModel
 from diffusers.utils import load_image
 
 depth_estimator = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to("cuda")
@@ -21,15 +24,43 @@ controlnet = ControlNetModel.from_pretrained(
     torch_dtype=torch.float16,
 )
 vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
-pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
-    "stabilityai/stable-diffusion-xl-base-1.0",
-    controlnet=controlnet,
-    vae=vae,
-    variant="fp16",
-    use_safetensors=True,
-    torch_dtype=torch.float16,
-)
-pipe = pipe.to("cuda")
+
+if USE_NF4:
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_quant_type="nf4",
+    )
+    unet = UNet2DConditionModel.from_pretrained(
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        subfolder="unet",
+        quantization_config=quant_config,
+        device_map={"": "cuda"},
+    )
+    pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        controlnet=controlnet,
+        vae=vae,
+        unet=unet,
+        variant="fp16",
+        use_safetensors=True,
+        torch_dtype=torch.float16,
+    )
+    # UNet already on cuda via device_map; only move other components
+    pipe.vae = pipe.vae.to("cuda")
+    pipe.controlnet = pipe.controlnet.to("cuda")
+    pipe.text_encoder = pipe.text_encoder.to("cuda")
+    pipe.text_encoder_2 = pipe.text_encoder_2.to("cuda")
+else:
+    pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        controlnet=controlnet,
+        vae=vae,
+        variant="fp16",
+        use_safetensors=True,
+        torch_dtype=torch.float16,
+    )
+    pipe = pipe.to("cuda")
 pipe.load_lora_weights("latent-consistency/lcm-lora-sdxl")
 pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
 pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead")
@@ -75,8 +106,9 @@ if __name__ == "__main__":
         image=image,
         control_image=depth_image,
         strength=0.99,
-        num_inference_steps=50,
+        num_inference_steps=4,
         controlnet_conditioning_scale=controlnet_conditioning_scale,
+        guidance_scale=1.5,
         generator=generator,
     ).images
     output_dir = os.path.join(os.path.dirname(__file__), "output_images")

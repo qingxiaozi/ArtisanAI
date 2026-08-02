@@ -42,14 +42,17 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     if image is None:
         return None, ""
 
-    t_start = time.time()
+    t_total = time.time()
 
     # Resize to 1024x1024 (required by the pipeline)
     original_size = image.size
     image = image.resize((1024, 1024))
 
     # Get depth map
+    t_depth_start = time.time()
     depth_image = get_depth_map(image)
+    torch.cuda.synchronize()
+    t_depth = time.time() - t_depth_start
 
     # Set up generator
     if seed < 0:
@@ -58,6 +61,18 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     else:
         generator = torch.Generator(device="cuda").manual_seed(seed)
 
+    # Track per-step denoising time
+    step_durations = []
+    t_last = time.time()
+    def step_callback(pipe, step, timestep, callback_kwargs):
+        nonlocal t_last
+        torch.cuda.synchronize()
+        now = time.time()
+        step_durations.append(now - t_last)
+        t_last = now
+        return callback_kwargs
+
+    t_pipe_start = time.time()
     result = pipe(
         prompt=prompt,
         negative_prompt=negative_prompt or None,
@@ -68,13 +83,34 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
         controlnet_conditioning_scale=conditioning_scale,
         guidance_scale=guidance_scale,
         generator=generator,
+        callback_on_step_end=step_callback,
     ).images[0]
+    torch.cuda.synchronize()
+    t_pipe = time.time() - t_pipe_start
+
+    # step_durations[0] = encode+step1, [1..] = step2..N, t_pipe - sum = VAE decode
+    n_steps = int(steps)
+    if len(step_durations) > 1:
+        t_setup = step_durations[0]  # VAE/text encode + step1
+        t_per_step = sum(step_durations[1:]) / (len(step_durations) - 1)
+    else:
+        t_setup = t_pipe
+        t_per_step = t_pipe
 
     # Resize back to original input size
     result = result.resize(original_size)
 
-    elapsed = time.time() - t_start
-    timing_text = f"⏱ {elapsed:.1f}s ({int(steps)} steps, {elapsed / int(steps):.2f}s/step)"
+    elapsed = time.time() - t_total
+
+    n_steps = int(steps)
+    timing_lines = [
+        f"⏱ Total: {elapsed:.2f}s",
+        f"├─ Depth:      {t_depth:.2f}s",
+        f"├─ Setup:      {t_setup:.2f}s (encode + step1)",
+        f"├─ Denoise:    {t_per_step:.3f}s/step × {n_steps}",
+        f"└─ Pipe total: {t_pipe:.2f}s",
+    ]
+    timing_text = "\n".join(timing_lines)
     return result, timing_text
 
 
@@ -106,7 +142,7 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
 
         with gr.Column(scale=1):
             output_image = gr.Image(type="pil", label="Generated Image")
-            timing_output = gr.Textbox(label="Timing", interactive=False)
+            timing_output = gr.Textbox(label="Timing", interactive=False, lines=6)
 
     generate_btn.click(
         fn=generate,

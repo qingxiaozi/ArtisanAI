@@ -1,1 +1,2 @@
 diffusers
+gradio>=4,<5

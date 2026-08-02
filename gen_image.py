@@ -52,29 +52,30 @@ def get_depth_map(image):
     return image
 
 
-seed = 42
-generator = torch.Generator(device="cuda").manual_seed(seed)
+if __name__ == "__main__":
+    seed = 42
+    generator = torch.Generator(device="cuda").manual_seed(seed)
 
-prompt = "A robot, 4k photo"
-images_dir = os.path.join(os.path.dirname(__file__), "images")
-os.makedirs(images_dir, exist_ok=True)
-image = load_image(
-    "https://hf-mirror.com/datasets/hf-internal-testing/diffusers-images/resolve/main"
-    "/kandinsky/cat.png"
-).resize((1024, 1024))
-image.save(os.path.join(images_dir, "cat.png"))
-controlnet_conditioning_scale = 0.5  # recommended for good generalization
-depth_image = get_depth_map(image)
+    prompt = "A robot, 4k photo"
+    images_dir = os.path.join(os.path.dirname(__file__), "images")
+    os.makedirs(images_dir, exist_ok=True)
+    image = load_image(
+        "https://hf-mirror.com/datasets/hf-internal-testing/diffusers-images/resolve/main"
+        "/kandinsky/cat.png"
+    ).resize((1024, 1024))
+    image.save(os.path.join(images_dir, "cat.png"))
+    controlnet_conditioning_scale = 0.5  # recommended for good generalization
+    depth_image = get_depth_map(image)
 
-images = pipe(
-    prompt,
-    image=image,
-    control_image=depth_image,
-    strength=0.99,
-    num_inference_steps=50,
-    controlnet_conditioning_scale=controlnet_conditioning_scale,
-    generator=generator,
-).images
-output_dir = os.path.join(os.path.dirname(__file__), "output_images")
-os.makedirs(output_dir, exist_ok=True)
-images[0].save(os.path.join(output_dir, "robot_cat.png"))
+    images = pipe(
+        prompt,
+        image=image,
+        control_image=depth_image,
+        strength=0.99,
+        num_inference_steps=50,
+        controlnet_conditioning_scale=controlnet_conditioning_scale,
+        generator=generator,
+    ).images
+    output_dir = os.path.join(os.path.dirname(__file__), "output_images")
+    os.makedirs(output_dir, exist_ok=True)
+    images[0].save(os.path.join(output_dir, "robot_cat.png"))

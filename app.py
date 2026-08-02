@@ -2,9 +2,23 @@ import os
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HOME"] = os.path.join(os.path.dirname(__file__), "models")
 
+import time
+
 import gradio as gr
 import torch
+from PIL import Image
+from diffusers.utils import load_image
 from gen_image import pipe, get_depth_map
+
+# Ensure default input image exists
+_default_image_path = os.path.join(os.path.dirname(__file__), "images", "cat.png")
+if not os.path.exists(_default_image_path):
+    os.makedirs(os.path.dirname(_default_image_path), exist_ok=True)
+    cat_image = load_image(
+        "https://hf-mirror.com/datasets/hf-internal-testing/diffusers-images/resolve/main"
+        "/kandinsky/cat.png"
+    ).resize((1024, 1024))
+    cat_image.save(_default_image_path)
 
 # Monkey-patch: fix gradio_client 1.3.0 bug where pydantic v2 produces bool schemas
 from gradio_client import utils as gradio_client_utils
@@ -26,7 +40,9 @@ gradio_client_utils._json_schema_to_python_type = _patched_json_schema_to_python
 
 def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale, seed):
     if image is None:
-        return None
+        return None, ""
+
+    t_start = time.time()
 
     # Resize to 1024x1024 (required by the pipeline)
     original_size = image.size
@@ -57,7 +73,9 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     # Resize back to original input size
     result = result.resize(original_size)
 
-    return result
+    elapsed = time.time() - t_start
+    timing_text = f"⏱ {elapsed:.1f}s ({int(steps)} steps, {elapsed / int(steps):.2f}s/step)"
+    return result, timing_text
 
 
 with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
@@ -66,7 +84,7 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
 
     with gr.Row():
         with gr.Column(scale=1):
-            input_image = gr.Image(type="pil", label="Input Image")
+            input_image = gr.Image(type="pil", label="Input Image", value=_default_image_path)
             prompt = gr.Textbox(
                 value="A robot, 4k photo",
                 label="Prompt",
@@ -87,12 +105,19 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
 
         with gr.Column(scale=1):
             output_image = gr.Image(type="pil", label="Generated Image")
+            timing_output = gr.Textbox(label="Timing", interactive=False)
 
     generate_btn.click(
         fn=generate,
         inputs=[input_image, prompt, negative_prompt, strength, steps, conditioning_scale, seed],
-        outputs=output_image,
+        outputs=[output_image, timing_output],
     )
 
 if __name__ == "__main__":
+    # Warm up pipeline (first inference compiles CUDA kernels)
+    print("Warming up pipeline...")
+    warmup_img = Image.open(_default_image_path)
+    generate(warmup_img, "A robot, 4k photo", "", 0.99, 20, 0.5, 42)
+    print("Warmup done.")
+
     demo.launch(server_name="0.0.0.0")

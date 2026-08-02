@@ -58,17 +58,16 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     else:
         generator = torch.Generator(device="cuda").manual_seed(seed)
 
-    with torch.autocast("cuda"):
-        result = pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt or None,
-            image=image,
-            control_image=depth_image,
-            strength=strength,
-            num_inference_steps=int(steps),
-            controlnet_conditioning_scale=conditioning_scale,
-            generator=generator,
-        ).images[0]
+    result = pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt or None,
+        image=image,
+        control_image=depth_image,
+        strength=strength,
+        num_inference_steps=int(steps),
+        controlnet_conditioning_scale=conditioning_scale,
+        generator=generator,
+    ).images[0]
 
     # Resize back to original input size
     result = result.resize(original_size)
@@ -99,7 +98,7 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
                 strength = gr.Slider(0.0, 1.0, value=0.99, step=0.01, label="Strength")
                 conditioning_scale = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="ControlNet Scale")
             with gr.Row():
-                steps = gr.Slider(1, 100, value=50, step=1, label="Steps")
+                steps = gr.Slider(1, 100, value=20, step=1, label="Steps")
                 seed = gr.Number(value=42, label="Seed (-1 = random)", precision=0)
             generate_btn = gr.Button("Generate", variant="primary")
 

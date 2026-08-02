@@ -29,7 +29,8 @@ pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
     use_safetensors=True,
     torch_dtype=torch.float16,
 )
-pipe.enable_model_cpu_offload()
+pipe = pipe.to("cuda")
+pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead")
 
 
 def get_depth_map(image):

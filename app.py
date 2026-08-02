@@ -38,7 +38,7 @@ def _patched_json_schema_to_python_type(schema, defs):
 gradio_client_utils.get_type = _patched_get_type
 gradio_client_utils._json_schema_to_python_type = _patched_json_schema_to_python_type
 
-def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale, seed):
+def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale, guidance_scale, seed):
     if image is None:
         return None, ""
 
@@ -66,6 +66,7 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
         strength=strength,
         num_inference_steps=int(steps),
         controlnet_conditioning_scale=conditioning_scale,
+        guidance_scale=guidance_scale,
         generator=generator,
     ).images[0]
 
@@ -98,8 +99,9 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
                 strength = gr.Slider(0.0, 1.0, value=0.99, step=0.01, label="Strength")
                 conditioning_scale = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="ControlNet Scale")
             with gr.Row():
-                steps = gr.Slider(1, 100, value=20, step=1, label="Steps")
-                seed = gr.Number(value=42, label="Seed (-1 = random)", precision=0)
+                steps = gr.Slider(1, 100, value=4, step=1, label="Steps")
+                guidance_scale = gr.Slider(0.5, 3.0, value=1.5, step=0.1, label="Guidance Scale")
+            seed = gr.Number(value=42, label="Seed (-1 = random)", precision=0)
             generate_btn = gr.Button("Generate", variant="primary")
 
         with gr.Column(scale=1):
@@ -108,7 +110,7 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
 
     generate_btn.click(
         fn=generate,
-        inputs=[input_image, prompt, negative_prompt, strength, steps, conditioning_scale, seed],
+        inputs=[input_image, prompt, negative_prompt, strength, steps, conditioning_scale, guidance_scale, seed],
         outputs=[output_image, timing_output],
     )
 
@@ -116,7 +118,7 @@ if __name__ == "__main__":
     # Warm up pipeline (first inference compiles CUDA kernels)
     print("Warming up pipeline...")
     warmup_img = Image.open(_default_image_path)
-    generate(warmup_img, "A robot, 4k photo", "", 0.99, 20, 0.5, 42)
+    generate(warmup_img, "A robot, 4k photo", "", 0.99, 4, 0.5, 1.5, 42)
     print("Warmup done.")
 
     demo.launch(server_name="0.0.0.0")

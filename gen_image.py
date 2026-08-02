@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 
 from transformers import DPTImageProcessor, DPTForDepthEstimation
-from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline, AutoencoderKL
+from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline, AutoencoderKL, LCMScheduler
 from diffusers.utils import load_image
 
 depth_estimator = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to("cuda")
@@ -30,6 +30,8 @@ pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
     torch_dtype=torch.float16,
 )
 pipe = pipe.to("cuda")
+pipe.load_lora_weights("latent-consistency/lcm-lora-sdxl")
+pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
 pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead")
 
 

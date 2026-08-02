@@ -44,11 +44,8 @@ LORA_MANIFEST = {
         "prompt": "watercolor painting style, soft color washes, gentle gradients, translucent tones, artistic flowing colors",
         "scale": 1.0,
     },
-    "赛博朋克": {
-        "repo_id": "issaccyj/lora-sdxl-cyberpunk",
-        "prompt": "cyberpunk style, neon lights, futuristic city, high tech low life, rain-slicked streets, blade runner aesthetic",
-        "scale": 1.0,
-    },
+    # 如需添加更多 LoRA，格式：
+    # "名称": {"repo_id": "huggingface/repo-id", "prompt": "...", "scale": 1.0},
 }
 
 # Ensure default input image exists
@@ -83,21 +80,14 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     if image is None:
         return None, ""
 
-    # Apply style LoRA
+    # Apply style LoRA (already loaded by on_lora_change; just ensure correct adapters)
     if lora_name and lora_name in LORA_MANIFEST and LORA_MANIFEST[lora_name]["repo_id"]:
         lora_info = LORA_MANIFEST[lora_name]
-        try:
-            # Remove previous style adapter if exists
-            if "style" in pipe.get_active_adapters():
-                pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
-                pipe.delete_adapters(["style"])
-            pipe.load_lora_weights(lora_info["repo_id"], adapter_name="style")
+        if "style" not in pipe.get_active_adapters():
             pipe.set_adapters([LIGHTNING_ADAPTER, "style"], adapter_weights=[1.0, lora_info.get("scale", 0.8)])
-        except Exception as e:
-            print(f"Failed to load LoRA '{lora_name}': {e}")
-            pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
     else:
-        pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
+        if LIGHTNING_ADAPTER not in pipe.get_active_adapters():
+            pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
 
     t_total = time.time()
 
@@ -209,6 +199,19 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
 
     def on_lora_change(lora_name):
         info = LORA_MANIFEST.get(lora_name, LORA_MANIFEST["无"])
+        # Pre-load LoRA on selection
+        if info["repo_id"]:
+            if "style" in pipe.get_active_adapters():
+                pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
+                pipe.delete_adapters(["style"])
+            try:
+                pipe.load_lora_weights(info["repo_id"], adapter_name="style")
+                pipe.set_adapters([LIGHTNING_ADAPTER, "style"], adapter_weights=[1.0, info.get("scale", 0.8)])
+            except Exception as e:
+                print(f"Failed to load LoRA '{lora_name}': {e}")
+                pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
+        else:
+            pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
         return info["prompt"]
 
     lora_selector.change(

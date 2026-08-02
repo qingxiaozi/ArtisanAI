@@ -72,7 +72,6 @@ _STYLE_LORA_REPOS = [
     "ntc-ai/SDXL-LoRA-slider.oil-painting",
     "ntc-ai/SDXL-LoRA-slider.pixar-style",
     "ostris/watercolor_style_lora_sdxl",
-    "issaccyj/lora-sdxl-cyberpunk",
 ]
 print("Pre-downloading style LoRAs...")
 for _repo in _STYLE_LORA_REPOS:

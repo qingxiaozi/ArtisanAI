@@ -8,7 +8,7 @@ import gradio as gr
 import torch
 from PIL import Image
 from diffusers.utils import load_image
-from gen_image import LORA_MANIFEST, apply_lora, get_depth_map, pipe
+from gen_image import LORA_MANIFEST, apply_lora, get_softedge_map, pipe
 
 # Ensure default input image exists
 _default_image_path = os.path.join(os.path.dirname(__file__), "images", "cat.png")
@@ -50,11 +50,11 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     original_size = image.size
     image = image.resize((1024, 1024))
 
-    # Get depth map
-    t_depth_start = time.time()
-    depth_image = get_depth_map(image)
+    # Get SoftEdge map
+    t_softedge_start = time.time()
+    softedge_image = get_softedge_map(image)
     torch.cuda.synchronize()
-    t_depth = time.time() - t_depth_start
+    t_softedge = time.time() - t_softedge_start
 
     # Set up generator
     if seed < 0:
@@ -79,7 +79,7 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
         prompt=prompt,
         negative_prompt=negative_prompt or None,
         image=image,
-        control_image=depth_image,
+        control_image=softedge_image,
         strength=strength,
         num_inference_steps=int(steps),
         controlnet_conditioning_scale=conditioning_scale,
@@ -107,7 +107,7 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     n_steps = int(steps)
     timing_lines = [
         f"⏱ Total: {elapsed:.2f}s",
-        f"├─ Depth:      {t_depth:.2f}s",
+        f"├─ SoftEdge:   {t_softedge:.2f}s",
         f"├─ Setup:      {t_setup:.2f}s (encode + step1)",
         f"├─ Denoise:    {t_per_step:.3f}s/step × {n_steps}",
         f"└─ Pipe total: {t_pipe:.2f}s",
@@ -116,9 +116,9 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     return result, timing_text
 
 
-with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
-    gr.Markdown("# 🎨 SDXL Depth ControlNet Image-to-Image")
-    gr.Markdown("Upload an image, enter a prompt, and generate a new image guided by depth estimation.")
+with gr.Blocks(title="SoftEdge-Controlled Image Generation") as demo:
+    gr.Markdown("# 🎨 SDXL SoftEdge ControlNet Image-to-Image")
+    gr.Markdown("Upload an image, enter a prompt, and generate a new image guided by soft edges.")
 
     with gr.Row():
         with gr.Column(scale=1):
@@ -140,7 +140,7 @@ with gr.Blocks(title="Depth-Controlled Image Generation") as demo:
                 lines=2,
             )
             with gr.Row():
-                strength = gr.Slider(0.0, 1.0, value=0.99, step=0.01, label="Strength")
+                strength = gr.Slider(0.0, 1.0, value=0.7, step=0.01, label="Strength")
                 conditioning_scale = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="ControlNet Scale")
             with gr.Row():
                 steps = gr.Slider(1, 100, value=8, step=1, label="Steps")

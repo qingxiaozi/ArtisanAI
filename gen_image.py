@@ -8,19 +8,16 @@ os.environ["HF_HOME"] = os.path.join(os.path.dirname(__file__), "models")
 USE_NF4 = False
 
 import torch
-import numpy as np
-from PIL import Image
 
-from transformers import DPTImageProcessor, DPTForDepthEstimation, BitsAndBytesConfig
+from controlnet_aux import HEDdetector
+from transformers import BitsAndBytesConfig
 from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline, AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
 from diffusers.utils import load_image
 
-depth_estimator = DPTForDepthEstimation.from_pretrained("Intel/dpt-hybrid-midas").to("cuda")
-feature_extractor = DPTImageProcessor.from_pretrained("Intel/dpt-hybrid-midas")
+softedge_processor = HEDdetector.from_pretrained("lllyasviel/Annotators").to("cuda")
 controlnet = ControlNetModel.from_pretrained(
-    "diffusers/controlnet-depth-sdxl-1.0-small",
-    variant="fp16",
-    use_safetensors=True,
+    "SargeZT/controlnet-sd-xl-1.0-softedge-dexined",
+    use_safetensors=False,
     torch_dtype=torch.float16,
 )
 vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
@@ -141,24 +138,13 @@ def apply_lora(lora_name):
 preload_style_loras()
 
 
-def get_depth_map(image):
-    image = feature_extractor(images=image, return_tensors="pt").pixel_values.to("cuda")
-    with torch.no_grad(), torch.autocast("cuda"):
-        depth_map = depth_estimator(image).predicted_depth
-
-    depth_map = torch.nn.functional.interpolate(
-        depth_map.unsqueeze(1),
-        size=(1024, 1024),
-        mode="bicubic",
-        align_corners=False,
+def get_softedge_map(image):
+    return softedge_processor(
+        image,
+        detect_resolution=1024,
+        image_resolution=1024,
+        scribble=False,
     )
-    depth_min = torch.amin(depth_map, dim=[1, 2, 3], keepdim=True)
-    depth_max = torch.amax(depth_map, dim=[1, 2, 3], keepdim=True)
-    depth_map = (depth_map - depth_min) / (depth_max - depth_min)
-    image = torch.cat([depth_map] * 3, dim=1)
-    image = image.permute(0, 2, 3, 1).cpu().numpy()[0]
-    image = Image.fromarray((image * 255.0).clip(0, 255).astype(np.uint8))
-    return image
 
 
 if __name__ == "__main__":
@@ -174,13 +160,13 @@ if __name__ == "__main__":
     ).resize((1024, 1024))
     image.save(os.path.join(images_dir, "cat.png"))
     controlnet_conditioning_scale = 0.5  # recommended for good generalization
-    depth_image = get_depth_map(image)
+    softedge_image = get_softedge_map(image)
 
     images = pipe(
         prompt,
         image=image,
-        control_image=depth_image,
-        strength=0.99,
+        control_image=softedge_image,
+        strength=0.7,
         num_inference_steps=4,
         controlnet_conditioning_scale=controlnet_conditioning_scale,
         guidance_scale=1.5,

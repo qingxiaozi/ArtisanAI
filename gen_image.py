@@ -63,27 +63,82 @@ else:
     pipe = pipe.to("cuda")
 pipe.load_lora_weights("ByteDance/SDXL-Lightning", weight_name="sdxl_lightning_8step_lora.safetensors")
 pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
-
-# Pre-download all style LoRAs (load then unload, files cached in models/)
-_STYLE_LORA_REPOS = [
-    "ming-yang/sdxl_chinese_ink_lora",
-    "ntc-ai/SDXL-LoRA-slider.Studio-Ghibli-style",
-    "ntc-ai/SDXL-LoRA-slider.anime",
-    "ntc-ai/SDXL-LoRA-slider.oil-painting",
-    "ntc-ai/SDXL-LoRA-slider.pixar-style",
-    "ostris/watercolor_style_lora_sdxl",
-]
-print("Pre-downloading style LoRAs...")
-for _repo in _STYLE_LORA_REPOS:
-    try:
-        pipe.load_lora_weights(_repo, adapter_name="_tmp")
-        pipe.delete_adapters(["_tmp"])
-        print(f"  Cached: {_repo}")
-    except Exception as e:
-        print(f"  Failed: {_repo} — {e}")
-print("LoRA pre-download done.")
-# Lightning adapter name (may be renamed to 'default_0' after pre-download dance)
+# Lightning adapter name.
 LIGHTNING_ADAPTER = pipe.get_active_adapters()[0]
+
+# LoRA manifest: display_name -> {repo_id, adapter_name, prompt, scale}
+# First use downloads and caches weights under models/.
+LORA_MANIFEST = {
+    "无": {"repo_id": None, "adapter_name": None, "prompt": "A robot, 4k photo", "scale": 0.8},
+    "中国水墨画": {
+        "repo_id": "ming-yang/sdxl_chinese_ink_lora",
+        "adapter_name": "ink",
+        "prompt": "traditional Chinese ink wash painting style, elegant brush strokes, misty mountains, black and white ink, poetic atmosphere",
+        "scale": 1.0,
+    },
+    "吉卜力工作室": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.Studio-Ghibli-style",
+        "adapter_name": "ghibli",
+        "prompt": "A beautiful Ghibli style portrait, hand-drawn animation, soft lighting, Miyazaki aesthetic, vibrant colors",
+        "scale": 1.0,
+    },
+    "日式动漫": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.anime",
+        "adapter_name": "anime",
+        "prompt": "anime style, Japanese animation, cel shading, clean lines, vibrant colors, detailed character design",
+        "scale": 1.0,
+    },
+    "油画": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.oil-painting",
+        "adapter_name": "oil",
+        "prompt": "oil painting style, thick brushstrokes, rich textures, classical composition, impasto technique",
+        "scale": 1.0,
+    },
+    "皮克斯动画": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.pixar-style",
+        "adapter_name": "pixar",
+        "prompt": "Pixar style, 3D animation render, cartoon aesthetic, soft lighting, expressive character, Disney CGI look",
+        "scale": 1.0,
+    },
+    "水彩画": {
+        "repo_id": "ostris/watercolor_style_lora_sdxl",
+        "adapter_name": "watercolor",
+        "prompt": "watercolor painting style, soft color washes, gentle gradients, translucent tones, artistic flowing colors",
+        "scale": 1.0,
+    },
+}
+
+
+def preload_style_loras():
+    print("Loading style LoRAs...")
+    for display_name, info in LORA_MANIFEST.items():
+        repo_id = info.get("repo_id")
+        adapter_name = info.get("adapter_name")
+        if not repo_id:
+            continue
+        if not adapter_name:
+            raise ValueError(f"LoRA '{display_name}' is missing adapter_name")
+
+        pipe.load_lora_weights(repo_id, adapter_name=adapter_name)
+        print(f"  Loaded {display_name}: {repo_id} as '{adapter_name}'")
+
+    pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
+    print("Style LoRAs loaded.")
+
+
+def apply_lora(lora_name):
+    info = LORA_MANIFEST.get(lora_name, LORA_MANIFEST["无"])
+    adapter_name = info.get("adapter_name")
+    if adapter_name:
+        pipe.set_adapters(
+            [LIGHTNING_ADAPTER, adapter_name],
+            adapter_weights=[1.0, info.get("scale", 1.0)],
+        )
+    else:
+        pipe.set_adapters([LIGHTNING_ADAPTER], adapter_weights=[1.0])
+
+
+preload_style_loras()
 
 
 def get_depth_map(image):

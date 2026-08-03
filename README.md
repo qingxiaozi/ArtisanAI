@@ -113,10 +113,22 @@ ssh -L 7860:localhost:7860 <user>@<host>
 | Strength | 0.7 | Denoising strength — higher means further from the input image |
 | ControlNet Scale | 0.5 | SoftEdge conditioning strength — higher means closer to the input edges |
 | Steps | 8 | Denoising steps; 8 is enough with the Lightning 8-step LoRA |
-| Guidance Scale | 1.5 | Lightning models require a low CFG (1.0–2.0) |
+| Guidance Scale | 1.0 | `1.0` disables classifier-free guidance, halving the UNet/ControlNet batch. Values above 1 re-enable CFG and roughly double the cost — Lightning is a distilled model and does not need it |
 | Seed | 42 | `-1` for random |
 
-Alongside the output image, the UI prints a timing breakdown (SoftEdge / encode+step1 / per-step denoise / pipeline total), which is handy for performance comparisons.
+Alongside the output image, the UI prints a per-run breakdown — LoRA switch time, SoftEdge extraction (marked `(cached)` on a cache hit), setup, per-step denoise, pipeline total, and peak VRAM — which is handy for performance comparisons:
+
+```
+⏱ Total: X.XXs
+├─ LoRA:       X.Xms (日式动漫)
+├─ SoftEdge:   X.XXs (cached)
+├─ Setup:      X.XXs (encode + step1)
+├─ Denoise:    X.XXXs/step × 5
+├─ Pipe total: X.XXs
+└─ VRAM peak:  X.XX GB allocated / X.XX GB reserved
+```
+
+Note that the denoise step count shown is the *actual* number executed — in img2img this is `int(steps × strength)`, so the defaults (8 steps × 0.7) run 5 steps, not 8.
 
 ### 2.2 Optional: Command-Line Single-Image Generation
 
@@ -184,7 +196,10 @@ Optimizations already in place:
 2. **All style LoRAs preloaded into VRAM** — switching styles only calls `set_adapters` to adjust weights instead of reloading from disk.
 3. **Full fp16 pipeline** + `sdxl-vae-fp16-fix` (works around the numerical overflow of the stock VAE in fp16).
 4. **Warmup at startup**, moving kernel-compilation cost out of the first user request.
-5. The `USE_NF4` NF4 quantization path is kept but disabled by default (measured gains were poor — see `gen_image.py:8`).
+5. **Classifier-free guidance disabled** (`guidance_scale = 1.0`) — the distilled Lightning model does not need CFG, and turning it off halves the UNet/ControlNet batch size.
+6. **SoftEdge map caching** — the HED result for the most recent input image is reused, so tweaking the prompt or switching styles on the same image skips edge detection entirely.
+7. **`torch.backends.cudnn.benchmark = True`** — input shapes are fixed (1024×1024, batch 1), so MIOpen autotunes convolution algorithms once; the cost is absorbed by the startup warmup and cached on disk.
+8. The `USE_NF4` NF4 quantization path is kept but disabled by default (measured gains were poor — see `gen_image.py:8`).
 
 ---
 

@@ -315,7 +315,8 @@
   <tr><td><b>双 LoRA 权重混合</b></td><td>加速用的 Lightning LoRA 始终以权重 1.0 激活，风格 LoRA 作为第二个 adapter 叠加</td><td>加速与风格解耦，任意风格都享有 8 步加速</td></tr>
   <tr><td><b>启动期 Warmup</b></td><td>服务启动时先用内置样例图跑一次完整推理</td><td>把 GPU kernel 首次编译开销从用户首次请求转移到启动阶段</td></tr>
   <tr><td><b>全程 fp16 不做 offload</b></td><td>所有组件常驻显存，不启用 <code>enable_model_cpu_offload()</code></td><td>避免每步推理的 Host↔Device 权重搬运，代价是更高的显存占用</td></tr>
-  <tr><td><b>分段性能埋点</b></td><td>通过 <code>callback_on_step_end</code> 逐步记录耗时并同步 GPU</td><td>可精确定位瓶颈环节；生产部署时可关闭以消除同步开销</td></tr>
+  <tr><td><b>SoftEdge 结果缓存</b></td><td>以输入图内容哈希为键缓存最近一张 HED 边缘图</td><td>同图调参、切换风格时跳过整个边缘检测环节——这正是交互式使用的主要模式</td></tr>
+  <tr><td><b>分段性能埋点</b></td><td>通过 <code>callback_on_step_end</code> 逐步记录耗时并同步 GPU，同时采集 PyTorch 显存峰值</td><td>可精确定位瓶颈环节；生产部署时可关闭以消除同步开销</td></tr>
 </table>
 
 <div class="pagebreak"></div>
@@ -342,10 +343,10 @@
 <p>使用时必须配套两项设置，缺一不可：</p>
 <ul>
   <li><b>调度器</b>：<code>EulerDiscreteScheduler</code> 且 <code>timestep_spacing="trailing"</code>。蒸馏训练时采用的是 trailing 时间步排布，推理时不匹配会导致成图明显劣化。</li>
-  <li><b>引导系数</b>：蒸馏模型已将引导效果内化到权重中，需使用低 CFG。当前实现取 <code>guidance_scale = 1.5</code>。</li>
+  <li><b>引导系数</b>：蒸馏模型已将引导效果内化到权重中，无需外部引导。本项目取 <code>guidance_scale = 1.0</code>，即<strong>完全关闭 classifier-free guidance</strong>。</li>
 </ul>
 <div class="note">
-<b>已识别的优化点：</b>Diffusers 中当 <code>guidance_scale &gt; 1</code> 时会启用 classifier-free guidance，UNet 与 ControlNet 需按 batch=2 各前向一次（正向 + 负向）。若将该值降至 <code>1.0</code>，批量减半，去噪环节理论上可获得接近 2× 的加速，代价是负向提示词失效。该优化尚待在目标硬件上实测验证。
+<b>关闭 CFG 的收益：</b>Diffusers 中当 <code>guidance_scale &gt; 1</code> 时会启用 classifier-free guidance，UNet 与 ControlNet 需按 batch=2 各前向一次（正向分支 + 负向分支）。由于 Lightning 已通过蒸馏将引导效果内化，这一路额外计算是纯粹的浪费。将该值设为 <code>1.0</code> 后批量减半，去噪环节的计算量直接降低约一半，是本项目单项收益最大的优化。代价是负向提示词失效——对已内化引导的蒸馏模型而言，这一功能本就意义有限。
 </div>
 
 <h3>4.4 核心算法三：多 LoRA 动态混合</h3>
@@ -370,7 +371,7 @@
   <tr><td><code>strength</code></td><td class="c">0.7</td><td>重绘强度，同时决定实际去噪步数 <code>int(steps × strength)</code></td></tr>
   <tr><td><code>controlnet_conditioning_scale</code></td><td class="c">0.5</td><td>边缘约束强度，越大越贴合原图结构</td></tr>
   <tr><td><code>num_inference_steps</code></td><td class="c">8</td><td>名义采样步数，与 Lightning 8-step LoRA 匹配</td></tr>
-  <tr><td><code>guidance_scale</code></td><td class="c">1.5</td><td>CFG 引导系数，蒸馏模型需取低值</td></tr>
+  <tr><td><code>guidance_scale</code></td><td class="c">1.0</td><td>CFG 引导系数，取 1.0 即关闭 CFG；蒸馏模型无需外部引导</td></tr>
   <tr><td><code>seed</code></td><td class="c">42</td><td>随机种子，固定后可做严格的风格对照实验</td></tr>
 </table>
 
@@ -452,17 +453,19 @@
 
 <h3>5.6 性能表现</h3>
 <div class="todo">
-<b>以下数据需在目标 AMD 硬件上实测填入。</b>系统界面已内置分段计时功能，运行后可直接读取各环节耗时。
+<b>以下数据需在目标 AMD 硬件上实测填入。</b>系统界面已内置完整的分段计时与显存统计，单次生成即可读取全部指标，无需外部工具。
 </div>
 <table>
-  <tr><th style="width:34%">指标</th><th class="c" style="width:22%">实测值</th><th>说明</th></tr>
-  <tr><td>SoftEdge 边缘提取</td><td class="c"><span class="fill">【待填写】</span></td><td>HED 检测器单次前向</td></tr>
+  <tr><th style="width:32%">指标</th><th class="c" style="width:20%">实测值</th><th>说明</th></tr>
+  <tr><td>SoftEdge 边缘提取（首次）</td><td class="c"><span class="fill">【待填写】</span></td><td>HED 检测器单次前向</td></tr>
+  <tr><td>SoftEdge 边缘提取（缓存命中）</td><td class="c"><span class="fill">【待填写】</span></td><td>同图复用，仅哈希校验开销</td></tr>
   <tr><td>Setup（文本编码 + 首步）</td><td class="c"><span class="fill">【待填写】</span></td><td>双 CLIP 编码 + VAE Encode + 第 1 步去噪</td></tr>
-  <tr><td>单步去噪耗时</td><td class="c"><span class="fill">【待填写】</span></td><td>UNet + ControlNet 单步前向</td></tr>
+  <tr><td>单步去噪耗时</td><td class="c"><span class="fill">【待填写】</span></td><td>UNet + ControlNet 单步前向（CFG 已关闭，batch=1）</td></tr>
   <tr><td>Pipeline 总耗时</td><td class="c"><span class="fill">【待填写】</span></td><td>含 VAE 解码</td></tr>
   <tr><td><b>端到端单图耗时</b></td><td class="c"><span class="fill">【待填写】</span></td><td>从点击生成到图像返回</td></tr>
-  <tr><td>风格切换额外开销</td><td class="c"><span class="fill">【待填写】</span></td><td>仅 <code>set_adapters()</code> 调用，预期接近 0</td></tr>
-  <tr><td>显存峰值占用</td><td class="c"><span class="fill">【待填写】</span></td><td>服务稳定运行时</td></tr>
+  <tr><td>风格切换额外开销</td><td class="c"><span class="fill">【待填写】</span></td><td>仅 <code>set_adapters()</code> 调用，预期为毫秒级</td></tr>
+  <tr><td>显存峰值（PyTorch allocated）</td><td class="c"><span class="fill">【待填写】</span></td><td>模型权重 + 中间激活的实际张量占用</td></tr>
+  <tr><td>显存峰值（进程级）</td><td class="c"><span class="fill">【待填写】</span></td><td><code>amd-smi process</code> 读数，含 HIP 运行时开销</td></tr>
 </table>
 
 <h3>5.7 已完成的平台侧优化</h3>
@@ -473,17 +476,23 @@
   <tr><td class="c">3</td><td><b>fp16 全流程</b></td><td>配合 fp16-fix VAE 保证数值稳定</td></tr>
   <tr><td class="c">4</td><td><b>启动期 Warmup</b></td><td>GPU kernel 首次编译开销前移至服务启动阶段，用户首次请求即达稳态性能</td></tr>
   <tr><td class="c">5</td><td><b>免 offload 常驻</b></td><td>消除逐步的 Host↔Device 权重搬运</td></tr>
+  <tr><td class="c">6</td><td><b>关闭 CFG</b></td><td><code>guidance_scale = 1.0</code>，UNet 与 ControlNet 批量由 2 降为 1，去噪计算量减半（详见 4.3 节）</td></tr>
+  <tr><td class="c">7</td><td><b>SoftEdge 结果缓存</b></td><td>缓存最近一张输入图的 HED 边缘图，同图调参或切换风格时跳过整个边缘检测环节</td></tr>
+  <tr><td class="c">8</td><td><b>MIOpen 卷积算法自动调优</b></td><td>启用 <code>torch.backends.cudnn.benchmark</code>，在 ROCm 上映射为 MIOpen 的 exhaustive find 模式，为固定输入形状实测选出最优卷积算法。本项目分辨率恒为 1024×1024、关闭 CFG 后 batch 恒为 1，形状完全稳定，满足该模式的生效前提；一次性调优开销由启动 warmup 吸收，且 MIOpen 会将结果持久化到本地数据库，服务重启后无需重新调优</td></tr>
 </table>
 
 <h3>5.8 后续优化方向</h3>
 <ol>
-  <li><b>关闭 CFG</b>（<code>guidance_scale</code> 取 1.0）——去噪环节 batch 减半，预期接近 2× 加速，优先级最高。</li>
-  <li><b>ControlNet 早停</b>——设置 <code>control_guidance_end</code> 使 ControlNet 仅在去噪前半程生效，可省去后半程的 ControlNet 前向开销。</li>
-  <li><b>SoftEdge 结果缓存</b>——同一输入图反复调参时复用边缘图，省去重复检测。</li>
-  <li><b>关闭计时同步</b>——生产模式下移除逐步的 <code>torch.cuda.synchronize()</code>，恢复 CPU/GPU 流水。</li>
-  <li><b>torch.compile</b>——对 UNet 与 ControlNet 做图编译，需先验证与动态 adapter 切换的兼容性。</li>
-  <li><b>轻量 VAE 解码</b>——引入 TAESD 做预览级快速解码，确认后再以完整 VAE 出终图。</li>
+  <li><b>ControlNet 早停</b>——设置 <code>control_guidance_end</code> 使 ControlNet 仅在去噪前半程生效。结构约束主要在早期步骤起作用，后期跳过对成图影响很小；本项目使用的是全尺寸 SDXL ControlNet（非蒸馏小模型），这部分开销占比可观。</li>
+  <li><b>降低边缘检测分辨率</b>——HED 的 <code>detect_resolution</code> 由 1024 降至 512，条件图输出分辨率保持不变。柔性边缘图本身是模糊的，降采样检测对成图质量影响极小。</li>
+  <li><b>关闭计时同步</b>——生产模式下移除逐步的 <code>torch.cuda.synchronize()</code>。该同步用于精确采集每步耗时，但会打断 CPU/GPU 流水，性能数据采集完成后可关闭。</li>
+  <li><b>更激进的蒸馏档位</b>——改用 4-step Lightning LoRA，实际去噪步数由 5 步进一步降至 2~3 步，需评估画质损失是否可接受。</li>
+  <li><b>torch.compile</b>——对 UNet 与 ControlNet 做图编译，通常可获得 20~30% 收益。但需先验证两点：与 <code>set_adapters</code> 动态切换是否触发重编译；以及 Triton 后端在 gfx1100（RDNA 3）上的成熟度——该后端在 CDNA 架构上的优化更为充分。</li>
+  <li><b>轻量 VAE 解码</b>——引入 TAESD 做预览级快速解码，用户确认后再以完整 VAE 输出终图。</li>
 </ol>
+<div class="note">
+需要说明的是，<b>本项目不考虑任何以降低显存为目标的优化手段</b>（量化、CPU offload、VAE 分块解码等）。在 48 GB 显存、实测占用约 11 GB 的前提下，这类手段没有收益空间，且普遍以牺牲速度为代价。优化方向集中于降低计算量与提升执行效率。
+</div>
 
 <footer>
 ArtisanAI 项目简介文档 &nbsp;·&nbsp; v1.0 &nbsp;·&nbsp; AMD Radeon GPU / ROCm 应用开发

@@ -9,6 +9,10 @@ USE_NF4 = False
 
 import torch
 
+# Input shapes are fixed (1024x1024, batch 1), so let MIOpen autotune conv algorithms.
+# The one-off tuning cost is absorbed by the startup warmup and cached on disk.
+torch.backends.cudnn.benchmark = True
+
 from controlnet_aux import HEDdetector
 from transformers import BitsAndBytesConfig
 from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline, AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
@@ -179,9 +183,9 @@ if __name__ == "__main__":
         image=image,
         control_image=softedge_image,
         strength=0.7,
-        num_inference_steps=4,
+        num_inference_steps=8,
         controlnet_conditioning_scale=controlnet_conditioning_scale,
-        guidance_scale=1.5,
+        guidance_scale=1.0,
         generator=generator,
     ).images
     output_dir = os.path.join(os.path.dirname(__file__), "output_images")

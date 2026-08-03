@@ -57,6 +57,7 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
         return None, ""
 
     t_total = time.time()
+    torch.cuda.reset_peak_memory_stats()
 
     t_lora_start = time.time()
     apply_lora(lora_name)
@@ -76,13 +77,10 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     # Set up generator
     if seed < 0:
         seed = torch.randint(0, 2**32 - 1, (1,)).item()
-        generator = torch.Generator(device="cuda").manual_seed(seed)
-    else:
-        generator = torch.Generator(device="cuda").manual_seed(seed)
+    generator = torch.Generator(device="cuda").manual_seed(seed)
 
     # Track per-step denoising time
     step_durations = []
-    t_last = time.time()
     def step_callback(pipe, step, timestep, callback_kwargs):
         nonlocal t_last
         torch.cuda.synchronize()
@@ -92,6 +90,7 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
         return callback_kwargs
 
     t_pipe_start = time.time()
+    t_last = t_pipe_start
     result = pipe(
         prompt=prompt,
         negative_prompt=negative_prompt or None,
@@ -114,6 +113,7 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     else:
         t_setup = t_pipe
         t_per_step = t_pipe
+    t_vae = max(t_pipe - sum(step_durations), 0.0)
 
     # Resize back to original input size
     result = result.resize(original_size)
@@ -122,12 +122,15 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
 
     # Actual denoise steps = int(steps * strength) in img2img, not the slider value
     timing_lines = [
-        f"⏱ Total: {elapsed:.2f}s",
+        f"⏱ Total: {elapsed:.2f}s  ·  seed {seed}",
         f"├─ LoRA:       {t_lora * 1000:.1f}ms ({lora_name})",
         f"├─ SoftEdge:   {t_softedge:.2f}s{' (cached)' if softedge_cached else ''}",
         f"├─ Setup:      {t_setup:.2f}s (encode + step1)",
         f"├─ Denoise:    {t_per_step:.3f}s/step × {len(step_durations)}",
-        f"└─ Pipe total: {t_pipe:.2f}s",
+        f"├─ VAE decode: {t_vae:.2f}s",
+        f"├─ Pipe total: {t_pipe:.2f}s",
+        f"└─ VRAM peak:  {torch.cuda.max_memory_allocated() / 2**30:.2f} GB allocated"
+        f" / {torch.cuda.max_memory_reserved() / 2**30:.2f} GB reserved",
     ]
     timing_text = "\n".join(timing_lines)
     return result, timing_text
@@ -153,11 +156,11 @@ with gr.Blocks(title="SoftEdge-Controlled Image Generation") as demo:
             )
             negative_prompt = gr.Textbox(
                 value="",
-                label="Negative Prompt",
+                label="Negative Prompt (only used when Guidance Scale > 1)",
                 lines=2,
             )
             with gr.Row():
-                strength = gr.Slider(0.0, 1.0, value=0.7, step=0.01, label="Strength")
+                strength = gr.Slider(0.1, 1.0, value=0.7, step=0.01, label="Strength")
                 conditioning_scale = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="ControlNet Scale")
             with gr.Row():
                 steps = gr.Slider(1, 100, value=8, step=1, label="Steps")
@@ -167,7 +170,7 @@ with gr.Blocks(title="SoftEdge-Controlled Image Generation") as demo:
 
         with gr.Column(scale=1):
             output_image = gr.Image(type="pil", label="Generated Image")
-            timing_output = gr.Textbox(label="Timing", interactive=False, lines=6)
+            timing_output = gr.Textbox(label="Timing", interactive=False, lines=9)
 
     def on_lora_change(lora_name):
         info = LORA_MANIFEST.get(lora_name, LORA_MANIFEST["无"])

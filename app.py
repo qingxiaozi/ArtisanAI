@@ -2,6 +2,7 @@ import os
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HOME"] = os.path.join(os.path.dirname(__file__), "models")
 
+import hashlib
 import time
 
 import gradio as gr
@@ -38,13 +39,29 @@ def _patched_json_schema_to_python_type(schema, defs):
 gradio_client_utils.get_type = _patched_get_type
 gradio_client_utils._json_schema_to_python_type = _patched_json_schema_to_python_type
 
+# Cache the last SoftEdge map: users typically tweak prompt/style on the same image
+_softedge_cache = None  # (image_hash, softedge_image)
+
+def get_softedge_cached(image):
+    global _softedge_cache
+    key = hashlib.md5(image.tobytes()).hexdigest()
+    if _softedge_cache is not None and _softedge_cache[0] == key:
+        return _softedge_cache[1], True
+    softedge_image = get_softedge_map(image)
+    _softedge_cache = (key, softedge_image)
+    return softedge_image, False
+
+
 def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale, guidance_scale, seed, lora_name):
     if image is None:
         return None, ""
 
-    apply_lora(lora_name)
-
     t_total = time.time()
+
+    t_lora_start = time.time()
+    apply_lora(lora_name)
+    torch.cuda.synchronize()
+    t_lora = time.time() - t_lora_start
 
     # Resize to 1024x1024 (required by the pipeline)
     original_size = image.size
@@ -52,7 +69,7 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
 
     # Get SoftEdge map
     t_softedge_start = time.time()
-    softedge_image = get_softedge_map(image)
+    softedge_image, softedge_cached = get_softedge_cached(image)
     torch.cuda.synchronize()
     t_softedge = time.time() - t_softedge_start
 
@@ -91,7 +108,6 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
     t_pipe = time.time() - t_pipe_start
 
     # step_durations[0] = encode+step1, [1..] = step2..N, t_pipe - sum = VAE decode
-    n_steps = int(steps)
     if len(step_durations) > 1:
         t_setup = step_durations[0]  # VAE/text encode + step1
         t_per_step = sum(step_durations[1:]) / (len(step_durations) - 1)
@@ -104,12 +120,13 @@ def generate(image, prompt, negative_prompt, strength, steps, conditioning_scale
 
     elapsed = time.time() - t_total
 
-    n_steps = int(steps)
+    # Actual denoise steps = int(steps * strength) in img2img, not the slider value
     timing_lines = [
         f"⏱ Total: {elapsed:.2f}s",
-        f"├─ SoftEdge:   {t_softedge:.2f}s",
+        f"├─ LoRA:       {t_lora * 1000:.1f}ms ({lora_name})",
+        f"├─ SoftEdge:   {t_softedge:.2f}s{' (cached)' if softedge_cached else ''}",
         f"├─ Setup:      {t_setup:.2f}s (encode + step1)",
-        f"├─ Denoise:    {t_per_step:.3f}s/step × {n_steps}",
+        f"├─ Denoise:    {t_per_step:.3f}s/step × {len(step_durations)}",
         f"└─ Pipe total: {t_pipe:.2f}s",
     ]
     timing_text = "\n".join(timing_lines)
@@ -144,7 +161,7 @@ with gr.Blocks(title="SoftEdge-Controlled Image Generation") as demo:
                 conditioning_scale = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="ControlNet Scale")
             with gr.Row():
                 steps = gr.Slider(1, 100, value=8, step=1, label="Steps")
-                guidance_scale = gr.Slider(0.5, 3.0, value=1.5, step=0.1, label="Guidance Scale")
+                guidance_scale = gr.Slider(0.5, 3.0, value=1.0, step=0.1, label="Guidance Scale (>1 enables CFG, ~2x slower)")
             seed = gr.Number(value=42, label="Seed (-1 = random)", precision=0)
             generate_btn = gr.Button("Generate", variant="primary")
 
@@ -172,7 +189,7 @@ if __name__ == "__main__":
     # Warm up pipeline (first inference compiles CUDA kernels)
     print("Warming up pipeline...")
     warmup_img = Image.open(_default_image_path)
-    generate(warmup_img, "A robot, 4k photo", "", 0.99, 8, 0.5, 1.5, 42, "无")
+    generate(warmup_img, "A robot, 4k photo", "", 0.99, 8, 0.5, 1.0, 42, "无")
     print("Warmup done.")
 
     demo.launch(server_name="0.0.0.0")

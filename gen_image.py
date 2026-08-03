@@ -67,10 +67,16 @@ LIGHTNING_ADAPTER = pipe.get_active_adapters()[0]
 # First use downloads and caches weights under models/.
 LORA_MANIFEST = {
     "无": {"repo_id": None, "adapter_name": None, "prompt": "A robot, 4k photo", "scale": 0.8},
-    "中国水墨画": {
-        "repo_id": "ming-yang/sdxl_chinese_ink_lora",
-        "adapter_name": "ink",
-        "prompt": "traditional Chinese ink wash painting style, elegant brush strokes, misty mountains, black and white ink, poetic atmosphere",
+    "日式动漫": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.anime",
+        "adapter_name": "anime",
+        "prompt": "anime style, Japanese animation, cel shading, clean lines, vibrant colors, detailed character design",
+        "scale": 1.0,
+    },
+    "像素艺术": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.pixel-art",
+        "adapter_name": "pixel_art",
+        "prompt": "pixel art style, 8-bit retro game aesthetic, blocky pixels, limited color palette, crisp dithering",
         "scale": 1.0,
     },
     "吉卜力工作室": {
@@ -79,10 +85,10 @@ LORA_MANIFEST = {
         "prompt": "A beautiful Ghibli style portrait, hand-drawn animation, soft lighting, Miyazaki aesthetic, vibrant colors",
         "scale": 1.0,
     },
-    "日式动漫": {
-        "repo_id": "ntc-ai/SDXL-LoRA-slider.anime",
-        "adapter_name": "anime",
-        "prompt": "anime style, Japanese animation, cel shading, clean lines, vibrant colors, detailed character design",
+    "卡通": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.cartoon",
+        "adapter_name": "cartoon",
+        "prompt": "cartoon style, bold outlines, flat bright colors, simplified shapes, playful exaggerated features",
         "scale": 1.0,
     },
     "油画": {
@@ -97,10 +103,16 @@ LORA_MANIFEST = {
         "prompt": "Pixar style, 3D animation render, cartoon aesthetic, soft lighting, expressive character, Disney CGI look",
         "scale": 1.0,
     },
-    "水彩画": {
-        "repo_id": "ostris/watercolor_style_lora_sdxl",
-        "adapter_name": "watercolor",
-        "prompt": "watercolor painting style, soft color washes, gentle gradients, translucent tones, artistic flowing colors",
+    "超写实插画": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.ultra-realistic-illustration",
+        "adapter_name": "ultra_realistic",
+        "prompt": "ultra realistic illustration, highly detailed digital painting, refined shading, lifelike textures, artstation quality",
+        "scale": 1.0,
+    },
+    "千禧独立漫画": {
+        "repo_id": "ntc-ai/SDXL-LoRA-slider.2000s-indie-comic-art-style",
+        "adapter_name": "indie_comic",
+        "prompt": "2000s indie comic art style, inked linework, halftone shading, gritty alternative comic book aesthetic",
         "scale": 1.0,
     },
 }

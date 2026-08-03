@@ -10,7 +10,7 @@ def main():
     
     # 优先使用本地下载的模型，否则从 HuggingFace 在线下载
     models_dir = os.path.join(base_dir, "models")
-    base_model_path = os.path.join(models_dir, "sdxl-base-1.0")
+    base_model_path = os.path.join(models_dir, "sdxl_base_v1")
     use_local = os.path.exists(base_model_path)
     print(f"模型来源: {'本地' if use_local else '在线下载 (HuggingFace)'}")
 

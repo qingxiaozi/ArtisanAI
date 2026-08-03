@@ -1,91 +1,98 @@
 import os
+import random
 import cv2
-import torch
 import numpy as np
 import subprocess
 import shutil
 from PIL import Image
 from tqdm import tqdm
+from scenedetect import open_video, SceneManager, ContentDetector
 from core.style_transfer import StyleTransferProcessor
 from utils.gpu_utils import clear_gpu_cache
 
+
 class VideoTransferProcessor:
     def __init__(self, device: str = "cuda"):
-        self.device = device
-        # 复用现有的图像风格转换引擎
         self.image_processor = StyleTransferProcessor(device=device)
-        
-    def process(self, video_path: str, output_path: str, prompt: str, 
-                style_lora_path: str = None, strength: float = 0.65, 
-                lora_scale: float = 0.8, batch_size: int = 4,
-                model_dir: str = None):
-        """
-        执行视频风格转换
-        """
+
+    def process(self, video_path: str, output_path: str, prompt: str,
+                style_lora_path: str = None, strength: float = 0.4,
+                lora_scale: float = 0.8, model_dir: str = None,
+                scene_threshold: float = 27.0):
+        """视频风格转换。检测场景，场景内固定 seed 保持风格一致。"""
         if not self.image_processor.pipe:
             self.image_processor.load_model(model_dir=model_dir)
 
-        # 1. 读取视频元数据
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise ValueError(f"无法打开视频文件: {video_path}")
-            
+
         fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        # 2. 初始化视频写入器
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-        print(f"开始视频风格化: {total_frames} 帧, 批次大小: {batch_size}")
-        
-        frame_buffer = []
-        frame_indices = []
-        success = False
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        out = self._init_writer(output_path, fps, width, height)
 
-        try:
-            for idx in tqdm(range(total_frames), desc="处理视频帧"):
+        scenes = self._detect_scenes(video_path, scene_threshold)
+
+        for scene_start, scene_end in tqdm(scenes, desc="处理场景"):
+            seed = random.randint(0, 2**31 - 1)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, scene_start)
+
+            for _ in range(scene_end - scene_start):
                 ret, frame_bgr = cap.read()
-                if not ret: break
-                
-                # BGR 转 RGB，再转 PIL
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(frame_rgb)
-                
-                frame_buffer.append(pil_image)
-                frame_indices.append(idx)
+                if not ret or frame_bgr is None or frame_bgr.size == 0:
+                    break
+                if len(frame_bgr.shape) != 3 or frame_bgr.shape[2] != 3:
+                    continue
+                try:
+                    styled = self._stylize_frame(frame_bgr, prompt, style_lora_path,
+                                                 strength, lora_scale, width, height,
+                                                 seed=seed)
+                    out.write(styled)
+                except Exception as e:
+                    print(f"\n帧处理异常: {e}")
+                    continue
 
-                # 当缓冲区满或到达最后一帧时，触发批量推理
-                if len(frame_buffer) >= batch_size or idx == total_frames - 1:
-                    processed_images = self._batch_infer(
-                        frame_buffer, prompt, style_lora_path, strength, lora_scale
-                    )
-                    
-                    # 缩放回原始分辨率并写入视频
-                    for img in processed_images:
-                        frame = img.resize((width, height), Image.LANCZOS)
-                        out.write(cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR))
-                    
-                    # 清空缓冲区
-                    frame_buffer.clear()
-                    frame_indices.clear()
-                    clear_gpu_cache() # 定期清理显存碎片
-            success = True
+            clear_gpu_cache()
 
-        finally:
-            cap.release()
-            out.release()
-            if success:
-                print(f"视频处理完成，已保存至: {output_path}")
-                self._ensure_h264_compatible(output_path)
+        cap.release()
+        out.release()
+        print(f"视频处理完成，已保存至: {output_path}")
+        self._ensure_h264_compatible(output_path)
+
+    def _init_writer(self, path, fps, width, height):
+        for codec in ["avc1", "mp4v"]:
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            out = cv2.VideoWriter(path, fourcc, fps, (width, height))
+            if out.isOpened():
+                return out
+        raise RuntimeError("无法创建视频写入器")
+
+    def _detect_scenes(self, video_path: str, threshold: float):
+        video = open_video(video_path)
+        manager = SceneManager()
+        manager.add_detector(ContentDetector(threshold=threshold))
+        manager.detect_scenes(video)
+        return [(s.get_frames(), e.get_frames()) for s, e in manager.get_scene_list()]
+
+    def _stylize_frame(self, frame_bgr, prompt, style_lora_path,
+                       strength, lora_scale, width, height, seed=None):
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        result = self.image_processor.process(
+            image=Image.fromarray(frame_rgb),
+            prompt=prompt,
+            style_lora_path=style_lora_path,
+            strength=strength,
+            lora_scale=lora_scale,
+            seed=seed,
+        )
+        result = result.resize((width, height), Image.LANCZOS)
+        return cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
 
     def _ensure_h264_compatible(self, output_path: str):
         if not shutil.which("ffmpeg"):
-            print("\u26a0 系统未安装 ffmpeg，建议用 VLC 播放或手动转码:")
-            print(f"  ffmpeg -i {output_path} -c:v libx264 {output_path.replace('.mp4', '_h264.mp4')}")
             return
         tmp_path = output_path + ".tmp.mp4"
         try:
@@ -95,24 +102,5 @@ class VideoTransferProcessor:
                 "-pix_fmt", "yuv420p", tmp_path
             ], check=True, capture_output=True)
             shutil.move(tmp_path, output_path)
-            print("\u2713 已自动转码为 H.264")
         except subprocess.CalledProcessError as e:
-            print(f"\u26a0 ffmpeg 转码失败: {e.stderr.decode()}")
-
-    def _batch_infer(self, images: list, prompt: str, style_lora_path: str, 
-                     strength: float, lora_scale: float) -> list:
-        """
-        批量图像推理（可扩展为真正的 Batch 推理以榨干 AMD GPU 性能）
-        当前采用串行调用以确保显存安全
-        """
-        results = []
-        for img in images:
-            result = self.image_processor.process(
-                image=img,
-                prompt=prompt,
-                style_lora_path=style_lora_path,
-                strength=strength,
-                lora_scale=lora_scale
-            )
-            results.append(result)
-        return results
+            print(f"ffmpeg 转码失败: {e.stderr.decode()}")

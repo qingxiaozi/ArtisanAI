@@ -1,9 +1,9 @@
 # ArtisanAI — SDXL Stylized Image Generation
 
-An image-to-image application built on **SDXL + SoftEdge ControlNet + SDXL-Lightning**, with a Gradio web interface and one-click switching between 8 style LoRAs (anime, pixel art, Studio Ghibli, cartoon, oil painting, Pixar, ultra-realistic illustration, 2000s indie comic).
+An image-to-image application built on **SDXL + Canny ControlNet (distilled) + SDXL-Lightning**, with a Gradio web interface and one-click switching between 8 style LoRAs (anime, pixel art, Studio Ghibli, cartoon, oil painting, Pixar, ultra-realistic illustration, 2000s indie comic).
 
 - `app.py` — Gradio web UI, **main entry point**
-- `gen_image.py` — model loading / LoRA management / SoftEdge extraction; imported by `app.py`
+- `gen_image.py` — model loading, LoRA management, Canny extraction and the instrumented `generate_image()`; imported by `app.py`, and runnable on its own
 
 ---
 
@@ -14,7 +14,7 @@ An image-to-image application built on **SDXL + SoftEdge ControlNet + SDXL-Light
 | Item | Requirement |
 | --- | --- |
 | GPU | 1×, ≥ 16 GB VRAM (full fp16 pipeline, no CPU offload) |
-| Disk | ≥ 30 GB free (model weights are cached in the project-local `models/`) |
+| Disk | ≥ 25 GB free (model weights are cached in the project-local `models/`) |
 | RAM | ≥ 16 GB |
 
 The code uses PyTorch's `cuda` device name throughout. Under the ROCm build of PyTorch this same API targets the AMD GPU, so no code changes are needed.
@@ -60,9 +60,8 @@ Models used:
 | Purpose | Model |
 | --- | --- |
 | Base model | `stabilityai/stable-diffusion-xl-base-1.0` (fp16 variant) |
-| ControlNet | `SargeZT/controlnet-sd-xl-1.0-softedge-dexined` |
+| ControlNet | `diffusers/controlnet-canny-sdxl-1.0-small` (fp16, 320 MB / 160M params — distilled, ~7.8x smaller than a full SDXL ControlNet) |
 | VAE | `madebyollin/sdxl-vae-fp16-fix` |
-| SoftEdge detector | `lllyasviel/Annotators` (HED) |
 | Acceleration LoRA | `ByteDance/SDXL-Lightning` (`sdxl_lightning_8step_lora.safetensors`) |
 | Style LoRAs ×8 | See table below — all from the `ntc-ai/SDXL-LoRA-slider.*` series, 9 MB each |
 
@@ -111,17 +110,17 @@ ssh -L 7860:localhost:7860 <user>@<host>
 | Style LoRA | 无 (none) | Switching a style also fills in that style's recommended prompt |
 | Prompt / Negative Prompt | varies by LoRA | Positive / negative prompts |
 | Strength | 0.7 | Denoising strength — higher means further from the input image |
-| ControlNet Scale | 0.5 | SoftEdge conditioning strength — higher means closer to the input edges |
+| ControlNet Scale | 0.5 | Canny conditioning strength — higher means closer to the input edges. Canny gives hard edges, so lower values (0.3-0.4) often look more natural for heavy stylization |
 | Steps | 8 | Denoising steps; 8 is enough with the Lightning 8-step LoRA |
 | Guidance Scale | 1.0 | `1.0` disables classifier-free guidance, halving the UNet/ControlNet batch. Values above 1 re-enable CFG and roughly double the cost — Lightning is a distilled model and does not need it |
 | Seed | 42 | `-1` for random |
 
-Alongside the output image, the UI prints a per-run breakdown — LoRA switch time, SoftEdge extraction (marked `(cached)` on a cache hit), setup, per-step denoise, pipeline total, and peak VRAM — which is handy for performance comparisons:
+Alongside the output image, the UI prints a per-run breakdown — LoRA switch time, Canny extraction (marked `(cached)` on a cache hit), setup, per-step denoise, pipeline total, and peak VRAM — which is handy for performance comparisons:
 
 ```
 ⏱ Total: X.XXs
 ├─ LoRA:       X.Xms (日式动漫)
-├─ SoftEdge:   X.XXs (cached)
+├─ Canny:      X.XXs (cached)
 ├─ Setup:      X.XXs (encode + step1)
 ├─ Denoise:    X.XXXs/step × 5
 ├─ Pipe total: X.XXs
@@ -138,7 +137,9 @@ To generate one image without starting the UI:
 python gen_image.py
 ```
 
-Uses the built-in sample image with the prompt `"A robot, 4k photo"` and writes the result to `output_images/robot_cat.png`.
+Uses the built-in sample image with the prompt `"A robot, 4k photo"`, writes the result to `output_images/robot_cat.png`, and prints **the same timing breakdown the web UI shows**. It runs one warmup pass first and reports only the second run, so the numbers are steady-state — handy for benchmarking without a browser.
+
+`generate_image()` is the single instrumented entry point shared by both the CLI and the web UI, so the two report identical metrics.
 
 ---
 
@@ -151,7 +152,7 @@ Uses the built-in sample image with the prompt `"A robot, 4k photo"` and writes 
 | `diffusers` | — | SDXL / ControlNet pipeline |
 | `gradio` | `>=4,<5` | Web UI |
 | `bitsandbytes` | — | NF4 quantization (the `USE_NF4` switch in `gen_image.py`, off by default) |
-| `controlnet-aux` | — | HED SoftEdge detector |
+| `controlnet-aux` | — | Canny edge detector (`CannyDetector`, OpenCV-based, no weights) |
 | `scikit-image` | `>=0.25.0` | Required by `controlnet-aux` |
 
 ### 3.2 Required in the base environment
@@ -188,18 +189,37 @@ ArtisanAI/
 
 ---
 
-## 5. Performance Notes
+## 5. Performance
 
-Optimizations already in place:
+### 5.1 Measured Results
+
+On the target platform (AMD Radeon Graphics, gfx1100 / RDNA 3, 48 GB VRAM, ROCm 7.2.1, PyTorch 2.9.1), at 1024x1024 with the UI defaults (`steps=8`, `strength=0.7` -> 5 actual denoise steps, `guidance_scale=1.0`), steady state after warmup:
+
+| Stage | Time | Share |
+| --- | --- | --- |
+| LoRA switch (`set_adapters`) | 48.1 ms | 2.3% |
+| Canny extraction | 0.01 s | 0.5% |
+| Setup (text/VAE encode + step 1) | 0.60 s | 29.3% |
+| Denoise | 0.246 s/step x 4 | 48.0% |
+| VAE decode | 0.40 s | 19.5% |
+| **End-to-end** | **2.05 s** | 100% |
+
+Peak VRAM: 9.91 GB allocated / 11.21 GB reserved (23% of the 48 GB available).
+
+The 48 ms LoRA switch is the payoff of preloading every adapter into VRAM — reloading from disk on each style change would cost seconds instead.
+
+### 5.2 Optimizations Already in Place
+
 
 1. **SDXL-Lightning 8-step LoRA** + `EulerDiscreteScheduler(timestep_spacing="trailing")`, cutting 50 steps down to 8.
 2. **All style LoRAs preloaded into VRAM** — switching styles only calls `set_adapters` to adjust weights instead of reloading from disk.
 3. **Full fp16 pipeline** + `sdxl-vae-fp16-fix` (works around the numerical overflow of the stock VAE in fp16).
 4. **Warmup at startup**, moving kernel-compilation cost out of the first user request.
 5. **Classifier-free guidance disabled** (`guidance_scale = 1.0`) — the distilled Lightning model does not need CFG, and turning it off halves the UNet/ControlNet batch size.
-6. **SoftEdge map caching** — the HED result for the most recent input image is reused, so tweaking the prompt or switching styles on the same image skips edge detection entirely.
-7. **`torch.backends.cudnn.benchmark = True`** — input shapes are fixed (1024×1024, batch 1), so MIOpen autotunes convolution algorithms once; the cost is absorbed by the startup warmup and cached on disk.
-8. The `USE_NF4` NF4 quantization path is kept but disabled by default (measured gains were poor — see `gen_image.py:8`).
+6. **Distilled ControlNet** — `controlnet-canny-sdxl-1.0-small` has 160M params against the 1.25B of a full SDXL ControlNet, and the Canny detector itself needs no model weights at all.
+7. **Canny map caching** — the edge map for the most recent input image is reused, so tweaking the prompt or switching styles on the same image skips edge detection entirely.
+8. **`torch.backends.cudnn.benchmark = True`** — input shapes are fixed (1024×1024, batch 1), so MIOpen autotunes convolution algorithms once; the cost is absorbed by the startup warmup and cached on disk.
+9. The `USE_NF4` NF4 quantization path is kept but disabled by default (measured gains were poor — see `gen_image.py:8`).
 
 ---
 

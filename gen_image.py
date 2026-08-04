@@ -7,21 +7,27 @@ os.environ["HF_HOME"] = os.path.join(os.path.dirname(__file__), "models")
 # ---- Quantization toggle (set to False for fp16) ----
 USE_NF4 = False
 
+import hashlib
+import time
+
 import torch
+from PIL import Image
 
 # Input shapes are fixed (1024x1024, batch 1), so let MIOpen autotune conv algorithms.
 # The one-off tuning cost is absorbed by the startup warmup and cached on disk.
 torch.backends.cudnn.benchmark = True
 
-from controlnet_aux import HEDdetector
+from controlnet_aux import CannyDetector
 from transformers import BitsAndBytesConfig
 from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline, AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
 from diffusers.utils import load_image
 
-softedge_processor = HEDdetector.from_pretrained("lllyasviel/Annotators").to("cuda")
+# Canny needs no weights; the distilled small ControlNet is 160M params vs 1.25B for a full one.
+canny_processor = CannyDetector()
 controlnet = ControlNetModel.from_pretrained(
-    "SargeZT/controlnet-sd-xl-1.0-softedge-dexined",
-    use_safetensors=False,
+    "diffusers/controlnet-canny-sdxl-1.0-small",
+    variant="fp16",
+    use_safetensors=True,
     torch_dtype=torch.float16,
 )
 vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
@@ -154,40 +160,127 @@ def apply_lora(lora_name):
 preload_style_loras()
 
 
-def get_softedge_map(image):
-    return softedge_processor(
+def get_canny_map(image, low_threshold=100, high_threshold=200):
+    return canny_processor(
         image,
+        low_threshold=low_threshold,
+        high_threshold=high_threshold,
         detect_resolution=1024,
         image_resolution=1024,
-        scribble=False,
     )
 
 
-if __name__ == "__main__":
-    seed = 42
+# Cache the last Canny map: users typically tweak prompt/style on the same image
+_canny_cache = None  # (image_hash, canny_image)
+
+
+def get_canny_cached(image):
+    global _canny_cache
+    key = hashlib.md5(image.tobytes()).hexdigest()
+    if _canny_cache is not None and _canny_cache[0] == key:
+        return _canny_cache[1], True
+    canny_image = get_canny_map(image)
+    _canny_cache = (key, canny_image)
+    return canny_image, False
+
+
+def generate_image(image, prompt, negative_prompt="", strength=0.7, steps=8,
+                   conditioning_scale=0.5, guidance_scale=1.0, seed=42, lora_name="无"):
+    """Generate one 1024x1024 image. Returns (PIL image, timing report string)."""
+    t_total = time.time()
+    torch.cuda.reset_peak_memory_stats()
+
+    t_lora_start = time.time()
+    apply_lora(lora_name)
+    torch.cuda.synchronize()
+    t_lora = time.time() - t_lora_start
+
+    image = image.resize((1024, 1024))
+
+    t_canny_start = time.time()
+    canny_image, canny_cached = get_canny_cached(image)
+    torch.cuda.synchronize()
+    t_canny = time.time() - t_canny_start
+
+    if seed < 0:
+        seed = torch.randint(0, 2**32 - 1, (1,)).item()
     generator = torch.Generator(device="cuda").manual_seed(seed)
 
-    prompt = "A robot, 4k photo"
-    images_dir = os.path.join(os.path.dirname(__file__), "images")
-    os.makedirs(images_dir, exist_ok=True)
-    image = load_image(
-        "https://hf-mirror.com/datasets/hf-internal-testing/diffusers-images/resolve/main"
-        "/kandinsky/cat.png"
-    ).resize((1024, 1024))
-    image.save(os.path.join(images_dir, "cat.png"))
-    controlnet_conditioning_scale = 0.5  # recommended for good generalization
-    softedge_image = get_softedge_map(image)
+    # Track per-step denoising time
+    step_durations = []
+    def step_callback(pipe, step, timestep, callback_kwargs):
+        nonlocal t_last
+        torch.cuda.synchronize()
+        now = time.time()
+        step_durations.append(now - t_last)
+        t_last = now
+        return callback_kwargs
 
-    images = pipe(
-        prompt,
+    t_pipe_start = time.time()
+    t_last = t_pipe_start
+    result = pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt or None,
         image=image,
-        control_image=softedge_image,
-        strength=0.7,
-        num_inference_steps=8,
-        controlnet_conditioning_scale=controlnet_conditioning_scale,
-        guidance_scale=1.0,
+        control_image=canny_image,
+        strength=strength,
+        num_inference_steps=int(steps),
+        controlnet_conditioning_scale=conditioning_scale,
+        guidance_scale=guidance_scale,
         generator=generator,
-    ).images
+        callback_on_step_end=step_callback,
+    ).images[0]
+    torch.cuda.synchronize()
+    t_pipe = time.time() - t_pipe_start
+
+    # step_durations[0] = encode+step1, [1..] = step2..N, t_pipe - sum = VAE decode
+    if len(step_durations) > 1:
+        t_setup = step_durations[0]  # VAE/text encode + step1
+        t_per_step = sum(step_durations[1:]) / (len(step_durations) - 1)
+    else:
+        t_setup = t_pipe
+        t_per_step = t_pipe
+    t_vae = max(t_pipe - sum(step_durations), 0.0)
+
+    elapsed = time.time() - t_total
+
+    # Actual denoise steps = int(steps * strength) in img2img, not the slider value
+    timing_text = "\n".join([
+        f"⏱ Total: {elapsed:.2f}s  ·  seed {seed}",
+        f"├─ LoRA:       {t_lora * 1000:.1f}ms ({lora_name})",
+        f"├─ Canny:      {t_canny:.2f}s{' (cached)' if canny_cached else ''}",
+        f"├─ Setup:      {t_setup:.2f}s (encode + step1)",
+        f"├─ Denoise:    {t_per_step:.3f}s/step × {len(step_durations)}",
+        f"├─ VAE decode: {t_vae:.2f}s",
+        f"├─ Pipe total: {t_pipe:.2f}s",
+        f"└─ VRAM peak:  {torch.cuda.max_memory_allocated() / 2**30:.2f} GB allocated"
+        f" / {torch.cuda.max_memory_reserved() / 2**30:.2f} GB reserved",
+    ])
+    return result, timing_text
+
+
+if __name__ == "__main__":
+    images_dir = os.path.join(os.path.dirname(__file__), "images")
+    image_path = os.path.join(images_dir, "cat.png")
+    if not os.path.exists(image_path):
+        os.makedirs(images_dir, exist_ok=True)
+        load_image(
+            "https://hf-mirror.com/datasets/hf-internal-testing/diffusers-images/resolve/main"
+            "/kandinsky/cat.png"
+        ).resize((1024, 1024)).save(image_path)
+    image = Image.open(image_path).convert("RGB")
+
+    prompt = "A robot, 4k photo"
+
+    # First run pays kernel compilation and MIOpen autotuning; discard its timings.
+    print("Warming up...")
+    generate_image(image, prompt)
+
+    _canny_cache = None  # force a cache miss so the Canny number is the real one
+    result, timing = generate_image(image, prompt)
+    print(timing)
+
     output_dir = os.path.join(os.path.dirname(__file__), "output_images")
     os.makedirs(output_dir, exist_ok=True)
-    images[0].save(os.path.join(output_dir, "robot_cat.png"))
+    result.save(os.path.join(output_dir, "robot_cat.png"))
+    print(f"Saved to {os.path.join(output_dir, 'robot_cat.png')}")

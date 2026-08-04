@@ -161,7 +161,7 @@
 <p>ArtisanAI 面向 AMD Radeon GPU + ROCm 平台，构建一套<strong>结构可控、风格可切换、响应达到交互级</strong>的图像风格化系统。核心技术选择是三者的组合：</p>
 <ul>
   <li><b>SDXL-Lightning 对抗蒸馏 LoRA</b> —— 把采样步数从 50 步压到 8 步，解决速度问题；</li>
-  <li><b>SoftEdge ControlNet</b> —— 用柔性边缘图约束生成，解决结构保持问题；</li>
+  <li><b>蒸馏版 Canny ControlNet</b> —— 用边缘图约束生成解决结构保持问题，且采用 160M 参数的蒸馏模型而非 1.25B 的全尺寸版本；</li>
   <li><b>多 LoRA 常驻显存 + 动态权重混合</b> —— 8 种风格全部预加载，切换只改 adapter 权重而不重新加载，解决切换延迟问题。</li>
 </ul>
 
@@ -183,7 +183,7 @@
   <tr>
     <td><b>电商 / 营销从业者</b></td>
     <td>商品图、宣传物料的风格化改造，降低外包插画成本</td>
-    <td>SoftEdge 保证商品轮廓不失真，风格叠加不改变主体结构</td>
+    <td>边缘约束保证商品轮廓不失真，风格叠加不改变主体结构</td>
   </tr>
   <tr>
     <td><b>教育 / 展示场景</b></td>
@@ -205,7 +205,7 @@
 <p>用户通过 <code>ControlNet Scale</code>（边缘约束强度）与 <code>Strength</code>（重绘强度）两个正交参数，在「忠于原图」与「风格强烈」之间连续调节，找到适合当前素材的平衡点。</p>
 
 <h4>场景 C — 性能演示与调优</h4>
-<p>界面实时输出 SoftEdge 提取、文本编码、逐步去噪、VAE 解码各环节耗时，可用于在 AMD 平台上定位性能瓶颈、验证优化效果。</p>
+<p>界面实时输出边缘提取、文本编码、逐步去噪、VAE 解码各环节耗时，可用于在 AMD 平台上定位性能瓶颈、验证优化效果。</p>
 
 <h3>2.3 场景约束</h3>
 <div class="note">
@@ -237,7 +237,7 @@
       <div class="boxes">
         <div class="box grey"><span class="t">预处理</span><span class="d">缩放 1024²</span></div>
         <div class="box grey"><span class="t">LoRA 切换</span><span class="d">apply_lora()</span></div>
-        <div class="box grey"><span class="t">条件图生成</span><span class="d">SoftEdge 提取</span></div>
+        <div class="box grey"><span class="t">条件图生成</span><span class="d">Canny 边缘提取</span></div>
         <div class="box grey"><span class="t">推理调度</span><span class="d">Pipeline 调用</span></div>
         <div class="box grey"><span class="t">后处理</span><span class="d">还原原始尺寸</span></div>
         <div class="box grey"><span class="t">性能埋点</span><span class="d">分段计时回调</span></div>
@@ -250,9 +250,9 @@
     <div class="layer-hd">模型层 &nbsp;—&nbsp; gen_image.py（全部常驻显存）</div>
     <div class="layer-bd">
       <div class="boxes">
-        <div class="box"><span class="t">HED 边缘检测器</span><span class="d">lllyasviel/Annotators</span></div>
+        <div class="box"><span class="t">Canny 边缘检测</span><span class="d">OpenCV，无模型权重</span></div>
         <div class="box"><span class="t">SDXL 主干</span><span class="d">CLIP×2 + UNet + VAE</span></div>
-        <div class="box"><span class="t">SoftEdge ControlNet</span><span class="d">dexined 全尺寸</span></div>
+        <div class="box"><span class="t">Canny ControlNet</span><span class="d">蒸馏版 160M 参数</span></div>
         <div class="box"><span class="t">LoRA 管理器</span><span class="d">Lightning + 8 风格 adapter</span></div>
       </div>
     </div>
@@ -276,7 +276,7 @@
 <pre class="flow">
 输入图像 (任意尺寸)
    │
-   ├─► resize 1024×1024 ──► HED SoftEdge 检测 ──────────► 边缘条件图 control_image
+   ├─► resize 1024×1024 ──► Canny 边缘检测 ────────────► 边缘条件图 control_image
    │                                                              │
    ├─► resize 1024×1024 ──► VAE Encode ──► 初始 latent            │
    │                              │                               │
@@ -287,7 +287,7 @@
                               │                                          │
                               │   ┌────────────────┐   残差注入          │
                               │   │  ControlNet    │ ─────────┐          │
-                              │   │  (SoftEdge)    │          ▼          │
+                              │   │  (Canny 蒸馏)  │          ▼          │
                               │   └────────────────┘   ┌─────────────┐   │
                               │                        │    UNet     │   │
                               │   LoRA 权重混合 ──────► │  + Lightning│   │
@@ -315,7 +315,7 @@
   <tr><td><b>双 LoRA 权重混合</b></td><td>加速用的 Lightning LoRA 始终以权重 1.0 激活，风格 LoRA 作为第二个 adapter 叠加</td><td>加速与风格解耦，任意风格都享有 8 步加速</td></tr>
   <tr><td><b>启动期 Warmup</b></td><td>服务启动时先用内置样例图跑一次完整推理</td><td>把 GPU kernel 首次编译开销从用户首次请求转移到启动阶段</td></tr>
   <tr><td><b>全程 fp16 不做 offload</b></td><td>所有组件常驻显存，不启用 <code>enable_model_cpu_offload()</code></td><td>避免每步推理的 Host↔Device 权重搬运，代价是更高的显存占用</td></tr>
-  <tr><td><b>SoftEdge 结果缓存</b></td><td>以输入图内容哈希为键缓存最近一张 HED 边缘图</td><td>同图调参、切换风格时跳过整个边缘检测环节——这正是交互式使用的主要模式</td></tr>
+  <tr><td><b>边缘图结果缓存</b></td><td>以输入图内容哈希为键缓存最近一张 Canny 边缘图</td><td>同图调参、切换风格时跳过整个边缘检测环节——这正是交互式使用的主要模式</td></tr>
   <tr><td><b>分段性能埋点</b></td><td>通过 <code>callback_on_step_end</code> 逐步记录耗时并同步 GPU，同时采集 PyTorch 显存峰值</td><td>可精确定位瓶颈环节；生产部署时可关闭以消除同步开销</td></tr>
 </table>
 
@@ -326,17 +326,32 @@
 <table>
   <tr><th style="width:17%">角色</th><th style="width:36%">模型</th><th>说明</th></tr>
   <tr><td><b>基座模型</b></td><td><code>stabilityai/stable-diffusion-xl-base-1.0</code><br>(fp16 variant)</td><td>SDXL 1.0，双文本编码器 + 2.6B 参数 UNet，原生 1024×1024</td></tr>
-  <tr><td><b>结构控制</b></td><td><code>SargeZT/controlnet-sd-xl-1.0-softedge-dexined</code></td><td>SoftEdge 全尺寸 SDXL ControlNet，接收柔性边缘图作为空间条件</td></tr>
-  <tr><td><b>边缘检测</b></td><td><code>lllyasviel/Annotators</code> (HED)</td><td>整体嵌套边缘检测，输出连续灰度的柔性边缘，比 Canny 更利于保留笔触与渐变</td></tr>
+  <tr><td><b>结构控制</b></td><td><code>diffusers/controlnet-canny-sdxl-1.0-small</code></td><td><b>蒸馏版</b> SDXL ControlNet，160M 参数 / 320 MB fp16，约为全尺寸版本的 1/7.8</td></tr>
+  <tr><td><b>边缘检测</b></td><td>OpenCV Canny（<code>controlnet-aux</code> 封装）</td><td>传统算子，<b>无需任何模型权重</b>，纯 CPU 计算，不占显存</td></tr>
   <tr><td><b>图像解码器</b></td><td><code>madebyollin/sdxl-vae-fp16-fix</code></td><td>修正版 VAE，规避官方 SDXL VAE 在 fp16 下的数值溢出</td></tr>
   <tr><td><b>加速模块</b></td><td><code>ByteDance/SDXL-Lightning</code><br><code>sdxl_lightning_8step_lora.safetensors</code></td><td>渐进式对抗蒸馏得到的 8 步采样 LoRA</td></tr>
   <tr><td><b>风格模块</b></td><td><code>ntc-ai/SDXL-LoRA-slider.*</code> × 8</td><td>见 4.4 节，单个权重仅 9 MB</td></tr>
 </table>
 
-<h3>4.2 核心算法一：SoftEdge ControlNet 结构约束</h3>
+<h3>4.2 核心算法一：Canny ControlNet 结构约束</h3>
 <p>ControlNet 通过复制 UNet 编码器分支并接受额外的空间条件图，将条件特征以残差形式注入主干 UNet 的对应层，从而在不破坏基座模型能力的前提下施加空间约束。</p>
-<p>本项目选择 <b>SoftEdge</b> 而非 Canny/Depth 作为条件类型，原因是：Canny 输出二值硬边缘，会连同噪声一起强制保留，风格化时容易产生生硬的描边感；Depth 只保留深度层次，会丢失平面内的纹理细节。HED 产生的柔性边缘是连续灰度的，既锁定了主体轮廓与结构关系，又给风格化留出了笔触与色彩的自由度。</p>
+
+<h4>条件类型的选择</h4>
+<p>可用于结构约束的条件类型可按「结构锁定强度」排成一条谱系：Canny（二值硬边缘，最紧）→ Lineart（线稿）→ SoftEdge（连续灰度柔边）→ Scribble（粗略轮廓）→ Depth（仅三维层次，平面内最自由）。锁定越紧，构图还原度越高，但留给风格化的自由度越小。</p>
+<p>本项目的选型经历过一次实测驱动的调整。初始版本采用 <b>SoftEdge</b>（HED 检测器 + 全尺寸 SoftEdge ControlNet），理论上它位于谱系中段、平衡最佳。但该路线存在一个工程上的硬约束：<strong>SoftEdge/Scribble 类型在开源社区中没有任何蒸馏小模型</strong>——可用的权重均为 1.25B 参数的全尺寸 ControlNet，且所用仓库仅提供 fp32 格式（5 GB），需在加载时现场转换精度。</p>
+<p>最终改用 <b>Canny</b>，决定性因素是：<strong>Canny 与 Depth 是仅有的两类拥有官方蒸馏版本的条件类型</strong>，而 Canny 与 SoftEdge 同属边缘系，语义最为接近，是唯一可行的降级替换。切换后的收益：</p>
+<table>
+  <tr><th style="width:30%">维度</th><th class="c" style="width:23%">SoftEdge（原方案）</th><th class="c" style="width:23%">Canny（现方案）</th><th class="c">变化</th></tr>
+  <tr><td>ControlNet 参数量</td><td class="c">1.25 B</td><td class="c"><b>160 M</b></td><td class="c"><b>↓ 7.8×</b></td></tr>
+  <tr><td>权重体积</td><td class="c">5004 MB (fp32)</td><td class="c"><b>320 MB</b> (fp16)</td><td class="c"><b>↓ 15.6×</b></td></tr>
+  <tr><td>边缘检测器</td><td class="c">HED，29.4 MB 权重</td><td class="c"><b>OpenCV，无权重</b></td><td class="c">↓ 100%</td></tr>
+</table>
+<p>代价是 Canny 输出二值硬边缘，会连同图像噪声一并保留，重度风格化时可能产生偏生硬的描边感。实践中通过适当调低 <code>controlnet_conditioning_scale</code>（0.3~0.4）即可缓解——这正是把该参数暴露到界面上的原因。</p>
 <p>约束强度由 <code>controlnet_conditioning_scale</code> 控制（默认 0.5）：数值越大越贴合原图边缘，越小则风格化越自由。</p>
+
+<div class="note">
+<b>关于「参数量减少 7.8 倍」的实际收益：</b>ControlNet 是附加在 UNet 之上的旁路分支，而非替代品。以 SDXL 的 2.6B UNet 为基准，全尺寸 ControlNet 使每步计算量增至约 1.48 倍，换用 160M 的蒸馏版后降至约 1.06 倍——<strong>去噪环节的实际提速约为 28%，而非 7.8 倍</strong>。真正的计算主体始终是 UNet 本身。本项目对此保持清醒认识：ControlNet 的轻量化是有价值的一环，但采样步数的压缩（见 4.3 节）才是量级上的优化。
+</div>
 
 <h3>4.3 核心算法二：SDXL-Lightning 少步采样</h3>
 <p>SDXL-Lightning 采用<strong>渐进式对抗蒸馏</strong>（progressive adversarial distillation）：以原始 SDXL 为教师模型，训练学生模型在少数几步内逼近教师多步采样的结果，并引入对抗损失以避免少步采样常见的模糊问题。产出以 LoRA 形式发布，可直接叠加到原始 SDXL 权重上。</p>
@@ -377,10 +392,6 @@
 
 <div class="pagebreak"></div>
 <h2>五、AMD Radeon GPU / ROCm 适配说明</h2>
-
-<div class="todo">
-<b>⚠ 本节含待补充内容。</b>以下标注 <span class="fill">【待填写】</span> 的项目需要在目标 AMD 硬件上实测后填入，请勿直接提交本节的占位内容。
-</div>
 
 <h3>5.1 运行环境</h3>
 
@@ -436,12 +447,12 @@
 <h3>5.4 显存管理</h3>
 <p>系统采用「全部常驻、不做 offload」策略：</p>
 <ul>
-  <li>SDXL 主干、ControlNet、VAE、HED 检测器、Lightning LoRA 与 8 个风格 LoRA 全部驻留显存；</li>
+  <li>SDXL 主干、蒸馏版 ControlNet、VAE、Lightning LoRA 与 8 个风格 LoRA 全部驻留显存（Canny 检测为纯 CPU 算子，不占显存）；</li>
   <li>风格 LoRA 单个仅 9 MB，8 个合计约 72 MB，相对基座模型可忽略，这使得「全部预加载」的设计在显存上完全可行；</li>
   <li>不启用 <code>enable_model_cpu_offload()</code>，避免每步推理都发生 Host↔Device 权重搬运——在 PCIe 带宽受限的场景下，offload 带来的延迟往往超过计算本身。</li>
 </ul>
 <p>本平台 48 GB 的显存容量为该策略提供了充分空间：即使在 fp16 全精度、ControlNet 与全部 LoRA 常驻的配置下，显存仍有大量余量，无需为容量做任何妥协（如量化、分块解码或分层 offload）。这也是 5.5 节中量化方案被判定为「无必要」的直接前提。</p>
-<p>显存实测占用：约 <b>11 GB</b> <span class="fill">【待确认：<code>amd-smi</code> 观测到两个进程分别占用 9.3 GB 与 11.2 GB，请确认其中哪一个为本服务实例后据实填写】</span></p>
+<p>显存实测占用：<b>PyTorch 张量峰值 9.91 GB，分配器保留 11.21 GB</b>（详见 5.6 节）。相对 48 GB 的可用容量，占用率约 23%，余量充足。</p>
 
 <h3>5.5 量化方案的取舍</h3>
 <p>项目实现中保留了基于 bitsandbytes NF4 的 4-bit 量化通路（<code>gen_image.py</code> 中的 <code>USE_NF4</code> 开关），可将 UNet 权重压缩至 4-bit 以降低显存占用。但经实测评估后<strong>默认关闭</strong>，原因有二：</p>
@@ -452,21 +463,26 @@
 <p>该通路作为低显存设备（如 8~12 GB 消费级显卡）的备选方案保留在代码中，可通过单个布尔开关启用，不影响主路径。</p>
 
 <h3>5.6 性能表现</h3>
-<div class="todo">
-<b>以下数据需在目标 AMD 硬件上实测填入。</b>系统界面已内置完整的分段计时与显存统计，单次生成即可读取全部指标，无需外部工具。
-</div>
+<p>测试条件：输入图 1024×1024，<code>steps=8</code>、<code>strength=0.7</code>（实际执行 5 步去噪）、<code>guidance_scale=1.0</code>、<code>controlnet_conditioning_scale=0.5</code>、<code>seed=42</code>。数据取自服务预热完成后的稳态运行，由系统内置的分段计时与显存统计直接输出。</p>
+
 <table>
-  <tr><th style="width:32%">指标</th><th class="c" style="width:20%">实测值</th><th>说明</th></tr>
-  <tr><td>SoftEdge 边缘提取（首次）</td><td class="c"><span class="fill">【待填写】</span></td><td>HED 检测器单次前向</td></tr>
-  <tr><td>SoftEdge 边缘提取（缓存命中）</td><td class="c"><span class="fill">【待填写】</span></td><td>同图复用，仅哈希校验开销</td></tr>
-  <tr><td>Setup（文本编码 + 首步）</td><td class="c"><span class="fill">【待填写】</span></td><td>双 CLIP 编码 + VAE Encode + 第 1 步去噪</td></tr>
-  <tr><td>单步去噪耗时</td><td class="c"><span class="fill">【待填写】</span></td><td>UNet + ControlNet 单步前向（CFG 已关闭，batch=1）</td></tr>
-  <tr><td>Pipeline 总耗时</td><td class="c"><span class="fill">【待填写】</span></td><td>含 VAE 解码</td></tr>
-  <tr><td><b>端到端单图耗时</b></td><td class="c"><span class="fill">【待填写】</span></td><td>从点击生成到图像返回</td></tr>
-  <tr><td>风格切换额外开销</td><td class="c"><span class="fill">【待填写】</span></td><td>仅 <code>set_adapters()</code> 调用，预期为毫秒级</td></tr>
-  <tr><td>显存峰值（PyTorch allocated）</td><td class="c"><span class="fill">【待填写】</span></td><td>模型权重 + 中间激活的实际张量占用</td></tr>
-  <tr><td>显存峰值（进程级）</td><td class="c"><span class="fill">【待填写】</span></td><td><code>amd-smi process</code> 读数，含 HIP 运行时开销</td></tr>
+  <tr><th style="width:32%">指标</th><th class="c" style="width:18%">实测值</th><th class="c" style="width:10%">占比</th><th>说明</th></tr>
+  <tr><td>LoRA 切换（<code>set_adapters</code>）</td><td class="c">48.1 ms</td><td class="c">2.3%</td><td>纯显存内权重系数调整，无磁盘 I/O</td></tr>
+  <tr><td>Canny 边缘提取</td><td class="c">0.01 s</td><td class="c">0.5%</td><td>OpenCV 算子，CPU 侧计算，无模型权重</td></tr>
+  <tr><td>Setup（文本编码 + 首步）</td><td class="c">0.60 s</td><td class="c">29.3%</td><td>双 CLIP 编码 + VAE Encode + 第 1 步去噪</td></tr>
+  <tr><td>单步去噪耗时</td><td class="c"><b>0.246 s</b>/step</td><td class="c">48.0%</td><td>UNet + ControlNet 单步前向，CFG 已关闭（batch=1），第 2~5 步共 4 步</td></tr>
+  <tr><td>VAE 解码</td><td class="c">0.40 s</td><td class="c">19.5%</td><td>fp16-fix VAE，latent → 1024×1024 图像</td></tr>
+  <tr><td>Pipeline 总耗时</td><td class="c">1.98 s</td><td class="c">96.6%</td><td>编码 + 5 步去噪 + 解码</td></tr>
+  <tr><td><b>端到端单图耗时</b></td><td class="c"><b>2.05 s</b></td><td class="c">100%</td><td>从请求到图像返回的完整链路</td></tr>
+  <tr><td>显存峰值（PyTorch allocated）</td><td class="c">9.91 GB</td><td class="c">—</td><td>模型权重 + 中间激活的实际张量占用</td></tr>
+  <tr><td>显存峰值（PyTorch reserved）</td><td class="c">11.21 GB</td><td class="c">—</td><td>分配器缓存池；<code>amd-smi</code> 的进程级读数在此基础上再加 HIP 运行时上下文开销</td></tr>
 </table>
+
+<div class="note">
+<b>结论：1024×1024 图生图端到端 2.05 秒</b>，达到交互级响应。开销分布为——<b>去噪 77%</b>（Setup 内含首步）、<b>VAE 解码 20%</b>、LoRA 切换与边缘提取合计不足 3%。
+<br><br>
+两点值得注意：其一，<b>LoRA 切换仅 48 毫秒</b>，验证了「全量预加载 + 权重混合」设计的有效性——若改为传统的读盘重载方式，此项将是秒级开销，8 种风格的快速比选将无法成立。其二，<b>在步数已压缩至 5 步后，固定开销（Setup 中的编码部分 + VAE 解码，合计约 0.75 s）已接近去噪本身的量级</b>，这意味着继续削减采样步数的边际收益正在快速递减，后续优化重心应转向编解码环节（见 5.8 节）。
+</div>
 
 <h3>5.7 已完成的平台侧优化</h3>
 <table>
@@ -477,18 +493,17 @@
   <tr><td class="c">4</td><td><b>启动期 Warmup</b></td><td>GPU kernel 首次编译开销前移至服务启动阶段，用户首次请求即达稳态性能</td></tr>
   <tr><td class="c">5</td><td><b>免 offload 常驻</b></td><td>消除逐步的 Host↔Device 权重搬运</td></tr>
   <tr><td class="c">6</td><td><b>关闭 CFG</b></td><td><code>guidance_scale = 1.0</code>，UNet 与 ControlNet 批量由 2 降为 1，去噪计算量减半（详见 4.3 节）</td></tr>
-  <tr><td class="c">7</td><td><b>SoftEdge 结果缓存</b></td><td>缓存最近一张输入图的 HED 边缘图，同图调参或切换风格时跳过整个边缘检测环节</td></tr>
+  <tr><td class="c">7</td><td><b>边缘图结果缓存</b></td><td>缓存最近一张输入图的 Canny 边缘图，同图调参或切换风格时跳过边缘检测。该机制在早期采用 HED 神经网络检测器时收益显著；改用 OpenCV Canny 后单次提取已降至 0.01 s，此项现为边际优化</td></tr>
   <tr><td class="c">8</td><td><b>MIOpen 卷积算法自动调优</b></td><td>启用 <code>torch.backends.cudnn.benchmark</code>，在 ROCm 上映射为 MIOpen 的 exhaustive find 模式，为固定输入形状实测选出最优卷积算法。本项目分辨率恒为 1024×1024、关闭 CFG 后 batch 恒为 1，形状完全稳定，满足该模式的生效前提；一次性调优开销由启动 warmup 吸收，且 MIOpen 会将结果持久化到本地数据库，服务重启后无需重新调优</td></tr>
 </table>
 
 <h3>5.8 后续优化方向</h3>
 <ol>
-  <li><b>ControlNet 早停</b>——设置 <code>control_guidance_end</code> 使 ControlNet 仅在去噪前半程生效。结构约束主要在早期步骤起作用，后期跳过对成图影响很小；本项目使用的是全尺寸 SDXL ControlNet（非蒸馏小模型），这部分开销占比可观。</li>
-  <li><b>降低边缘检测分辨率</b>——HED 的 <code>detect_resolution</code> 由 1024 降至 512，条件图输出分辨率保持不变。柔性边缘图本身是模糊的，降采样检测对成图质量影响极小。</li>
+  <li><b>轻量化 VAE 解码</b>——实测显示 VAE 解码占端到端耗时约 20%，在总步数已压缩到 5 步的前提下，它已成为仅次于去噪的第二大开销。可引入 TAESD 将该环节从数百毫秒降至数十毫秒，或采用两段式策略：预览阶段用 TAESD 快速出图，用户确认后再以完整 VAE 输出终图。</li>
+  <li><b>文本嵌入缓存</b>——同一提示词重复生成时跳过双 CLIP 编码。该开销包含在 Setup 环节内，实测约占端到端耗时的 17%。</li>
   <li><b>关闭计时同步</b>——生产模式下移除逐步的 <code>torch.cuda.synchronize()</code>。该同步用于精确采集每步耗时，但会打断 CPU/GPU 流水，性能数据采集完成后可关闭。</li>
   <li><b>更激进的蒸馏档位</b>——改用 4-step Lightning LoRA，实际去噪步数由 5 步进一步降至 2~3 步，需评估画质损失是否可接受。</li>
   <li><b>torch.compile</b>——对 UNet 与 ControlNet 做图编译，通常可获得 20~30% 收益。但需先验证两点：与 <code>set_adapters</code> 动态切换是否触发重编译；以及 Triton 后端在 gfx1100（RDNA 3）上的成熟度——该后端在 CDNA 架构上的优化更为充分。</li>
-  <li><b>轻量 VAE 解码</b>——引入 TAESD 做预览级快速解码，用户确认后再以完整 VAE 输出终图。</li>
 </ol>
 <div class="note">
 需要说明的是，<b>本项目不考虑任何以降低显存为目标的优化手段</b>（量化、CPU offload、VAE 分块解码等）。在 48 GB 显存、实测占用约 11 GB 的前提下，这类手段没有收益空间，且普遍以牺牲速度为代价。优化方向集中于降低计算量与提升执行效率。

@@ -72,8 +72,8 @@ with gr.Blocks(title="Canny-Controlled Image Generation") as demo:
                 lines=2,
             )
             with gr.Row():
-                strength = gr.Slider(0.1, 1.0, value=0.7, step=0.01, label="Strength")
-                conditioning_scale = gr.Slider(0.0, 1.0, value=0.5, step=0.05, label="ControlNet Scale")
+                strength = gr.Slider(0.1, 1.0, value=0.99, step=0.01, label="Strength")
+                conditioning_scale = gr.Slider(0.0, 1.0, value=0.4, step=0.05, label="ControlNet Scale")
             with gr.Row():
                 steps = gr.Slider(1, 100, value=8, step=1, label="Steps")
                 guidance_scale = gr.Slider(0.5, 3.0, value=1.0, step=0.1, label="Guidance Scale (>1 enables CFG, ~2x slower)")
